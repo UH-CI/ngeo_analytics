@@ -1,13 +1,21 @@
 import sqlite3 as sql
 from sqlite3 import Error
 import pandas
+
+import os
+os.environ["R_HOME"] = "E:/R/R-3.6.3" #path to your R installation
+os.environ["R_USER"] = "C:/Users/Jard/AppData/Local/Programs/Python/Python35/Lib/site-packages/rpy2"
+
+
 from rpy2.robjects import r as R
 #note, requires numpy <= 1.16.4 to work with newest windows rpy2 version
 from rpy2.robjects import pandas2ri
 
 
+
 dbf = "E:/ncbigeo/GEOmetadb.sqlite"
-cache = "E:/ncbigeo/"
+
+cache = "E:/ncbigeo/test"
 
 def create_connection(db_file):
     con = None
@@ -94,3 +102,6 @@ if con:
     data_map_expanded = data_map_expanded.reindex(columns = [gene_id_tag, value_tag])
 
     print(data_map_expanded)
+
+
+    #tissue/sample type
