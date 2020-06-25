@@ -34,59 +34,69 @@ class EntrezRequestHandler:
     # def read_xml_from_req_handle(self, handle):
     #     return Entrez.read(handle)
 
+#here have field param
+#handle list separation and stripping in field
 
-
-class AccessionTranslator:
+class PlatformFieldTranslator:
 
     def __init__(self, entrez_request_handler):
         self.__entrez_request_handler = entrez_request_handler
 
 
+    def get_gb_acc_from_nuc_id(self, gi):
+        handle = self.__entrez_request_handler.submit_entrez_request("efetch", "nuccore", id = gi, retmode = "xml")
 
-    def translate_ids(self, id_list):
+        record = Entrez.read(handle)[0]
+
+        return record.get("GBSeq_locus")
+
+    def get_gb_acc_from_pt_id(self, pt_gi):
+        handle = self.__entrez_request_handler.submit_entrez_request("efetch", "protein", id = pt_gi, retmode = "xml")
+
+        record = Entrez.read(handle)[0]
+
+        return record.get("GBSeq_locus")
+
+
+    def translate_acc(self, acc):
         result_list = []
 
-        for search_id in id_list:
-            data_list = []
+        handle = self.__entrez_request_handler.submit_entrez_request("esearch", "gene", "%s[ACCN]" % acc, retmode = "xml")
 
-            handle = self.__entrez_request_handler.submit_entrez_request("esearch", "gene", term = search_id, retmode = "xml")
+        res = Entrez.read(handle)
 
-            res = Entrez.read(handle)
+        gene_ids = res["IdList"]
 
-            gene_ids = res["IdList"]
+        # print(gene_ids)
 
-            # print(gene_ids)
+        for i in range(len(gene_ids)):
 
-            for i in range(len(gene_ids)):
+            gene_id = res["IdList"][i]
 
-                gene_id = res["IdList"][i]
+            handle = self.__entrez_request_handler.submit_entrez_request("efetch", "gene", id = gene_id, retmode = "xml")
 
-                handle = self.__entrez_request_handler.submit_entrez_request("efetch", "gene", id = gene_id, retmode = "xml")
+            # with open("res.xml", "w") as f:
+            #     f.write(handle.read())
 
-                # with open("res.xml", "w") as f:
-                #     f.write(handle.read())
-
-                res = Entrez.read(handle)[0]
-                # print(res["GBSeq_moltype"])
-                # for item in res:
-                #     print(item)
-                # exit()
+            res = Entrez.read(handle)[0]
+            # print(res["GBSeq_moltype"])
+            # for item in res:
+            #     print(item)
+            # exit()
 
 
-                #print(res["Entrezgene_gene"])
+            #print(res["Entrezgene_gene"])
 
-                gene_data = res["Entrezgene_gene"]["Gene-ref"]
-                # print(gene_data.keys())
+            gene_data = res["Entrezgene_gene"]["Gene-ref"]
+            # print(gene_data.keys())
 
-                data = {
-                    "gene_symbol": gene_data.get("Gene-ref_locus"),
-                    "gene_synonyms": gene_data.get("Gene-ref_syn"),
-                    "gene_description": gene_data.get("Gene-ref_desc")
-                }
+            data = {
+                "gene_symbol": gene_data.get("Gene-ref_locus"),
+                "gene_synonyms": gene_data.get("Gene-ref_syn"),
+                "gene_description": gene_data.get("Gene-ref_desc")
+            }
 
-                data_list.append(data)
-
-            result_list.append(data_list)
+            result_list.append(data)
 
 
         return result_list
@@ -112,16 +122,5 @@ class AccessionTranslator:
 # for item in res[0]:
 #     print(item)
 
-#api_key = 3b60a5d390e42976d38ba5139892c9e12c08 
-        # Entrez.email = "mcleanj@hawaii.edu"
-        # Entrez.tool = "acc_id_translator"
-def main():
-    req_handler = EntrezRequestHandler("mcleanj@hawaii.edu", "acc_id_translator", "3b60a5d390e42976d38ba5139892c9e12c08")
-    translator = AccessionTranslator(req_handler)
-    data = translator.translate_ids(["n70041"])
-    print(len(data))
-    for l in data:
-        print(l)
 
-if __name__ == "__main__":
-    main()
+
