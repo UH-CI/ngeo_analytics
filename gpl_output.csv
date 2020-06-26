@@ -1,0 +1,11 @@
+gpl,table_valid,id_cols,successes,errors,ingestion_failed
+GPL7,true,"",,,false
+GPL12,true,"",,,false
+GPL8,true,"GB_ACC",0,0,true
+GPL14,true,"",,,false
+GPL15,true,"",,,false
+GPL16,true,"",,,false
+GPL13,true,"GB_ACC",0,208,true
+GPL9,true,"GB_LIST",0,729,true
+GPL10,true,"GB_LIST",0,1106,true
+GPL5,true,"GB_ACC",0,3084,false
