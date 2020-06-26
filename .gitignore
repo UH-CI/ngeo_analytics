@@ -2,4 +2,4 @@ entrez_config.json
 config.json
 cache
 out_logs
-*.sqlite
+**.sqlite
