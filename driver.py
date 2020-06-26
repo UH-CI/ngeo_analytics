@@ -25,11 +25,11 @@ import json
 import id_translator
 import requests
 
-import subprocess
-
 import math
 
 from multiprocessing import Manager
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 from enum import IntEnum
 
@@ -89,16 +89,20 @@ def create_connection(db_file):
 
 
 def submit_to_api(data):
-    url = "http://ngeo.cts.ci.its.hawaii.edu:8080/api/v1/gene_gpl_ref"
+    url = "https://ci.its.hawaii.edu/ngeo/api/v1/gene_gpl_ref"
     try:
-        res = requests.post(url, data)
+        headers = {'Content-type': 'application/json'}
+        res = requests.post(url, json = data, headers = headers, verify = False)
     except Exception as e:
+        print(e)
         return {
             "success": False,
             "message": e,
             "status": None
         }
+    print(res.content)
     if res.status_code == 201:
+        print(res)
         return {
             "success": True,
             "message": res.json(),
@@ -106,6 +110,7 @@ def submit_to_api(data):
         }
 
     else:
+        print(res.json())
         return {
             "success": False,
             "message": res.json()["message"],
@@ -201,8 +206,10 @@ def getData(gpl, entrez_config, cache, retry, out_file_gpl, out_file_row, gpl_lo
             res = None
             #+1 for initial try
             for i in range(retry + 1):
+                print(i)
                 #need gene_name, alt_names, description, platform, id
                 res = submit_to_api(data)
+                print(res)
                 if res["success"]:
                     break
 
