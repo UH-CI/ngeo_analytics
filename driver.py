@@ -27,6 +27,7 @@ import requests
 
 import math
 
+import multiprocessing
 from multiprocessing import Manager
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
@@ -100,12 +101,12 @@ def submit_to_api(data):
             "message": e,
             "status": None
         }
-    print(res.content)
+
     if res.status_code == 201:
         print(res)
         return {
             "success": True,
-            "message": res.json(),
+            "message": res.content,
             "status": 201
         }
 
@@ -113,7 +114,7 @@ def submit_to_api(data):
         print(res.json())
         return {
             "success": False,
-            "message": res.json()["message"],
+            "message": res.content,
             "status": res.status_code
         }
 
@@ -206,7 +207,6 @@ def getData(gpl, entrez_config, cache, retry, out_file_gpl, out_file_row, gpl_lo
             res = None
             #+1 for initial try
             for i in range(retry + 1):
-                print(i)
                 #need gene_name, alt_names, description, platform, id
                 res = submit_to_api(data)
                 print(res)
@@ -258,6 +258,8 @@ def main():
     dbf = config.get("dbf")
     cache = config.get("cache")
     p_max = config.get("p_max")
+    if p_max < 1:
+        p_max = multiprocessing.cpu_count()
     retry = config.get("retry")
     out_file_gpl = config.get("out_file_gpl")
     out_file_row = config.get("out_file_row")
@@ -290,7 +292,7 @@ def main():
             """)
 
 
-        res = cur.fetchall()[0:10]
+        res = cur.fetchall()
 
         #start process pool with id queue
         p_executor = ProcessPoolExecutor(p_max)

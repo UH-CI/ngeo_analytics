@@ -1,2 +1,2 @@
 GEOparse==2.0.1
-Bio
+biopython==1.76
