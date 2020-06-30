@@ -18,27 +18,27 @@ import sys, os
 # from rpy2.robjects.packages import importr
 
 import platform_processor
-
 import GEOparse
 import json
-
 import id_translator
 import requests
-
 import math
-
 import multiprocessing
-from multiprocessing import Manager
+# from multiprocessing import Manager
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
+from throttle_manager import CoordManager
 from enum import IntEnum
+import traceback
+
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 #two files, gpl based, and row based, gpl based list number of errors
 
 class ErrorCodes(IntEnum):
     no_res = 0
     multi_res = 1
+    post_err = 2
 
 #a lot of platforms have empty data tables, just ignore those
 
@@ -95,7 +95,6 @@ def submit_to_api(data):
         headers = {'Content-type': 'application/json'}
         res = requests.post(url, json = data, headers = headers, verify = False)
     except Exception as e:
-        print(e)
         return {
             "success": False,
             "message": e,
@@ -103,7 +102,6 @@ def submit_to_api(data):
         }
 
     if res.status_code == 201:
-        print(res)
         return {
             "success": True,
             "message": res.content,
@@ -111,16 +109,26 @@ def submit_to_api(data):
         }
 
     else:
-        print(res.json())
         return {
             "success": False,
             "message": res.content,
             "status": res.status_code
         }
 
+
+def iterable2csvstr(iterable):
+    csvstr = ""
+    for item in iterable:
+        csvstr += "%s," % item
+    #guard to make sure string not empty (if list empty)
+    if len(csvstr) > 0:
+        #remove trailing ,
+        csvstr = csvstr[:-1]
+    return csvstr
+
 #"gpl,table_valid,id_cols,successes,errors,ingestion_failed"
 #"gpl,row,error_type"
-def getData(gpl, entrez_config, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock):
+def getData(gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, translator):
     try:
         # raise Exception("test")
         # print("test", file = sys.stderr)
@@ -143,26 +151,20 @@ def getData(gpl, entrez_config, cache, retry, out_file_gpl, out_file_row, gpl_lo
                     f.write("%s,true,\"\",,,false\n" % gpl)
             return
 
-        req_handler = id_translator.EntrezRequestHandler(entrez_config.get("email"), entrez_config.get("tool_name"), entrez_config.get("api_token"))
-        translator = id_translator.PlatformFieldTranslator(req_handler)
+        success_count = 0
+        error_count = 0
+        row_errors = []
 
-        def write_out(ingestion_failed):
+        def write_log(ingestion_failed):
             with gpl_lock:
-                id_cols_str = ""
-                for col in gene_id_cols:
-                    id_cols_str += "%s," % col
-                id_cols_str = id_cols_str[:-1]
+                id_cols_str = iterable2csvstr(gene_id_cols)
                 with open(out_file_gpl, "a") as f:
-                    f.write("%s,true,\"%s\",%d,%d,%s\n" % (gpl, id_cols_str, success_count, error_count, ingestion_failed))
+                    f.write("%s,true,\"%s\",%d,%d,false\n" % (gpl, id_cols_str, success_count, error_count))
         
             with row_lock:
                 with open(out_file_row, "a") as f:
                     for error in row_errors:
                         f.write("%s,%d,%d\n" % (gpl, *error))
-
-        success_count = 0
-        error_count = 0
-        row_errors = []
 
         for index, row in table.iterrows():
             gene_id_col = None
@@ -180,17 +182,16 @@ def getData(gpl, entrez_config, cache, retry, out_file_gpl, out_file_row, gpl_lo
             value = row[gene_id_col]
             parsed = platform_processor.parse_id_col(value, gene_id_col)
             gb_acc = platform_processor.translate_to_acc(parsed, gene_id_col, translator)
-            
             gene_info = translator.translate_acc(gb_acc)
 
             #add gpl
             if len(gene_info) > 1:
-                row_errors.append((index, ErrorCodes.multi_res))
+                row_errors.append((index, ErrorCodes.multi_res, None))
                 error_count += 1
                 continue
 
             if len(gene_info) < 1:
-                row_errors.append((index, ErrorCodes.no_res))
+                row_errors.append((index, ErrorCodes.no_res, None))
                 error_count += 1
                 continue
 
@@ -204,25 +205,31 @@ def getData(gpl, entrez_config, cache, retry, out_file_gpl, out_file_row, gpl_lo
                 "ref_id": ref_id
             }
 
+            #convert gene synonym list to comma separated string
+            if data["gene_synonyms"] is not None:
+                data["gene_synonyms"] = iterable2csvstr(data["gene_synonyms"])
+
             res = None
             #+1 for initial try
             for i in range(retry + 1):
                 #need gene_name, alt_names, description, platform, id
                 res = submit_to_api(data)
-                print(res)
                 if res["success"]:
                     break
 
             if not res["success"]:
-                write_out("true")
-                raise Exception("Error: Failed to post data to api:\ngene_symbol: %s, gene_synonyms: %s, gene_description: %s, gpl: %s, ref_id: %s\n%s" % (data["gene_symbol"], data["gene_synonyms"], data["gene_description"], data["gpl"], data["ref_id"], res["message"]))
+                ecode = res["status"]
+                if ecode is None:
+                    ecode = ErrorCodes.post_err
+                row_errors.append((index, ecode, res["message"]))
+                error_count += 1
+            else:
+                success_count += 1
 
-            success_count += 1
-
-        write_out("false")
+        write_log()
             
     except Exception as e:
-        print(e, file = sys.stderr)
+        print(traceback.format_exc(), file = sys.stderr)
         exit(1)
 
 
@@ -270,7 +277,7 @@ def main():
         f.write("gpl,table_valid,id_cols,successes,errors,ingestion_failed\n")
     with open(out_file_row, "w") as f:
         #header for output csv
-        f.write("gpl,row,error_type\n")
+        f.write("gpl,row,error_type,message\n")
 
     con = create_connection(dbf)
 
@@ -297,16 +304,20 @@ def main():
         #start process pool with id queue
         p_executor = ProcessPoolExecutor(p_max)
 
-        lock_manager = Manager()
-        gpl_lock = lock_manager.Lock()
-        row_lock = lock_manager.Lock()
+        with CoordManager() as manager:
+            gpl_lock = manager.Lock()
+            row_lock = manager.Lock()
+            req_handler = manager.EntrezRequestHandler(entrez_config.get("email"), entrez_config.get("tool_name"), entrez_config.get("api_token"))
+            translator = manager.PlatformFieldTranslator(req_handler)
 
-        for ids in res:
-            gpl = ids[0]
-            p_executor.submit(getData, gpl, entrez_config, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock)
+            # req_handler = id_translator.EntrezRequestHandler(entrez_config.get("email"), entrez_config.get("tool_name"), entrez_config.get("api_token"))
+            # translator = id_translator.PlatformFieldTranslator(req_handler)
 
+            for ids in res:
+                gpl = ids[0]
+                p_executor.submit(getData, gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, translator)
 
-        p_executor.shutdown(True)
+            p_executor.shutdown(True)
 
 
 if __name__ == "__main__":

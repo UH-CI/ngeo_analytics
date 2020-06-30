@@ -55,7 +55,7 @@ search_id = "1789480"
 def get_gb_acc_from_nuc_id(gi):
     request_handler = id_translator.EntrezRequestHandler(config.get("email"), config.get("tool_name"), config.get("api_token"))
 
-    handle = request_handler.submit_entrez_request("efetch", "nuccore", id = gb_id, retmode = "xml")
+    handle = request_handler.submit_entrez_request("efetch", "nuccore", id = gi, retmode = "xml")
 
     record = Entrez.read(handle)[0]
 
