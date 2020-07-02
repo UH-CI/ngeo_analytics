@@ -301,6 +301,17 @@ def main():
 
         res = cur.fetchall()
 
+        #protein_accession
+        #protein_gi
+        #rna_nucleotide_accession
+        #rna_nucleotide_gi
+        #note accessions use acc.version, so have to use "LIKE <acc>._%"
+        #can add genomic_nucleotide_accession, matching GENOME_ACC, might be included with some orfs
+        #doesn't seem to be a standard field for genomic_nucleotide_id
+        #what is mature_peptide_accession?
+
+
+
         #start process pool with id queue
         p_executor = ProcessPoolExecutor(p_max)
 

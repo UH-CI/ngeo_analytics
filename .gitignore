@@ -2,3 +2,4 @@ entrez_config.json
 config.json
 cache
 *.sqlite
+*.gz

@@ -27,9 +27,8 @@ range_ids = ["GB_RANGE", "GI_RANGE"]
 
 list_ids = ["GB_LIST", "PT_LIST", "GI_LIST", "PT_GI_LIST"]
 
-#match accession fields first to avoid unnecessary translations
-acceptable_fields_preferred = ["GB_ACC", "PT_ACC", "RANGE_GB", "GB_RANGE", "GB_LIST", "PT_LIST"]
-acceptable_fields = ["GI", "PT_GI", "GI_RANGE", "GI_LIST", "PT_GI_LIST"]
+
+acceptable_fields = ["GENE_ID", "GI", "PT_GI", "GI_RANGE", "GI_LIST", "PT_GI_LIST", "GB_ACC", "PT_ACC", "RANGE_GB", "GB_RANGE", "GB_LIST", "PT_LIST", "GENOME_ACC"]
 
 nuc_trans = ["GI", "GI_RANGE", "GI_LIST"]
 pt_trans = ["PT_GI", "PT_GI_LIST"]
@@ -61,6 +60,8 @@ def strip_range(acc):
 
 
 
+
+
 def generate_parse_map():
     parse_map = {}
     for item in single_ids:
@@ -74,6 +75,40 @@ def generate_parse_map():
 
 parse_map = generate_parse_map()
 
+#looks like orf can map to locus_tag in gene_info possibly improperly formatted or gene symbol/alternatives (and maybe more!)
+
+#assumed mappings really hope these are correct
+#GENE_ID not a standard field but probably more or less consistent
+
+#looks like
+# mature_peptide_accession protein refseq
+# protein_accession protein genbank || refseq
+# rna_nucleotide_accession nuc genbank
+# genomic_nucleotide_accession nuc refseq || genbank
+#protein and nucleotide gis should be unique between refseq and genbank types, so shouldn't have an issue with conflicting mappings
+
+def generate_col_map():
+    col_map = {
+        "GI": ["genomic_nucleotide_gi", "rna_nucleotide_gi"],
+        "PT_GI": ["protein_gi", "mature_peptide_gi"],
+        "GI_RANGE": ["genomic_nucleotide_gi", "rna_nucleotide_gi"],
+        "GI_LIST": ["genomic_nucleotide_gi", "rna_nucleotide_gi"],
+        "PT_GI_LIST": ["protein_gi", "mature_peptide_gi"],
+        "GB_ACC": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
+        "PT_ACC": ["protein_accession", "mature_peptide_accession"],
+        "RANGE_GB": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
+        "GB_RANGE": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
+        "GB_LIST": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
+        "PT_LIST": ["protein_accession", "mature_peptide_accession"],
+        #documentation says can be genbank or refseq, example and gene database field name seem to suggest nucleotide, so allow nucleotide accession types
+        "GENOME_ACC": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
+        #non-standard field, but appears to be fairly common and should be standard format
+        "GENE_ID": ["gene_id"]
+    }
+    return col_map
+
+
+col_map = generate_col_map()
 
 
 
@@ -105,18 +140,11 @@ def parse_id_col(value, col):
 
     return parser(value)
 
-def translate_to_acc(value, col, translator):
-    if col in nuc_trans:
-        return translator.get_gb_acc_from_nuc_id(value)
 
-    if col in pt_trans:
-        return translator.get_gb_acc_from_pt_id(value)
-
-    return value
 
     
     
-
+def get_gene_id
 
 
 
