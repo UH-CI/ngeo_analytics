@@ -14,6 +14,12 @@
 
 
 import re
+import sqlite3
+
+db_file = "genedb.sqlite"
+
+con = sqlite3.connect()
+cur = con.cursor()
 
 
 #might have to be accession
@@ -21,17 +27,20 @@ import re
 
 #will swiss protein work the same as the normal protein ids?
 #RANGE_GB uses aux fields to show range, id should just be accession with version
-single_ids = ["GB_ACC", "PT_ACC", "RANGE_GB", "GI", "PT_GI"]
+single_ids = {"GB_ACC", "PT_ACC", "RANGE_GB", "GI", "PT_GI", "GENOME_ACC", "GENE_ID"}
 
-range_ids = ["GB_RANGE", "GI_RANGE"]
+range_ids = {"GB_RANGE", "GI_RANGE"}
 
-list_ids = ["GB_LIST", "PT_LIST", "GI_LIST", "PT_GI_LIST"]
+list_ids = {"GB_LIST", "PT_LIST", "GI_LIST", "PT_GI_LIST"}
+
+accessions = {"GB_ACC", "PT_ACC", "RANGE_GB", "GENOME_ACC", "GB_LIST", "PT_LIST", "GB_RANGE"}
+ids = {"GI", "PT_GI", "GI_RANGE", "GI_LIST", "PT_GI_LIST", "GENE_ID"}
 
 
-acceptable_fields = ["GENE_ID", "GI", "PT_GI", "GI_RANGE", "GI_LIST", "PT_GI_LIST", "GB_ACC", "PT_ACC", "RANGE_GB", "GB_RANGE", "GB_LIST", "PT_LIST", "GENOME_ACC"]
+acceptable_fields = {"GENE_ID", "GI", "PT_GI", "GI_RANGE", "GI_LIST", "PT_GI_LIST", "GB_ACC", "PT_ACC", "RANGE_GB", "GB_RANGE", "GB_LIST", "PT_LIST", "GENOME_ACC"}
 
-nuc_trans = ["GI", "GI_RANGE", "GI_LIST"]
-pt_trans = ["PT_GI", "PT_GI_LIST"]
+# nuc_trans = ["GI", "GI_RANGE", "GI_LIST"]
+# pt_trans = ["PT_GI", "PT_GI_LIST"]
 
 #map field to pipeline
 
@@ -132,6 +141,8 @@ def get_id_cols_and_validate(table):
 
     return gene_id_cols
 
+
+
 #python doesn't have switch statements, what a beautiful beautiful language
 def parse_id_col(value, col):
     parser = parse_map.get(col)
@@ -141,11 +152,33 @@ def parse_id_col(value, col):
     return parser(value)
 
 
-
+def get_gene_info_from_id(gene_id):
+    query = "SELECT gene_symbol, synonyms, description FROM gene_info WHERE gene_id == %s" % gene_id
+    cur.execute(query)
+    return cur.fetchone()
     
-    
-def get_gene_id
+#remember to clean value first
+def get_gene_id_from_gpl(gpl_col, value):
+    #already have gene id
+    if gpl_col is "GENE_ID":
+        return value
+    db_cols = col_map.get(gpl_col)
+    if db_cols is None:
+        return None
 
+    def get_where_clause(db_col):
+        if gpl_col in accessions:
+            return "%s GLOB '%s[.]*'" % (db_col, value)
+        else:
+            return "%s == '%s'" % (db_col, value)
+
+    where_clauses = []
+    for db_col in db_cols:
+        where_clauses.apend(get_where_clause(db_col))
+
+    query = "SELECT gene_id FROM gene2accession WHERE %s" % "OR ".join(where_clauses)
+    cur.execute(query)
+    return cur.fetchone()[0]
 
 
 
