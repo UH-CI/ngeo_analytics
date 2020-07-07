@@ -120,8 +120,8 @@ def create_data(sqlite_file, data):
 
 def main():
     data = [
-        ("gene_info", "c:/users/mcleanj/downloads/gene_info", False),
-        ("gene2accession", "c:/users/mcleanj/downloads/gene2accession", False)
+        #("gene_info", "c:/users/mcleanj/downloads/gene_info", False),
+        ("gene2accession", "c:/users/jard/downloads/gene2accession.gz", True)
     ]
     sqlite_file = "./genedb.sqlite"
     create_data(sqlite_file, data)

@@ -1,7 +1,7 @@
 
 import gzip
-#fp = "c:/users/jard/downloads/gene_info.gz"
-fp = "c:/users/jard/downloads/gene2accession.gz"
+fp = "c:/users/jard/downloads/gene_info.gz"
+#fp = "c:/users/jard/downloads/gene2accession.gz"
 
 s = set()
 
@@ -23,12 +23,12 @@ with gzip.open(fp, "rt") as f:
     #     # print(row[1])
     #     s.add(row[1])
 
-    print("\n\n")
-    for line in f:
-        row = line.strip().split("\t")
-        if (row[7] == "-") != (row[5] == "-"):
-            print(row)
-            break
+    # print("\n\n")
+    # for line in f:
+    #     row = line.strip().split("\t")
+    #     if (row[7] == "-") != (row[5] == "-"):
+    #         print(row)
+    #         break
 
 # params = ["sd", "cwsd", "csda", "er", "erw"]
 

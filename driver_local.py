@@ -3,7 +3,7 @@
 import sqlite3 as sql
 from sqlite3 import Error
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 import sys, os
 
@@ -17,7 +17,7 @@ import sys, os
 
 # from rpy2.robjects.packages import importr
 
-import platform_processor
+import platform_processor_local
 import GEOparse
 import json
 import id_translator
@@ -104,46 +104,67 @@ def submit_to_api(data):
     if res.status_code == 201:
         return {
             "success": True,
-            "message": res.content,
+            "message": res.content.decode("utf8"),
             "status": 201
         }
 
     else:
         return {
             "success": False,
-            "message": res.content,
+            "message": res.content.decode("utf8"),
             "status": res.status_code
         }
 
 
 def iterable2csvstr(iterable):
-    csvstr = ""
-    for item in iterable:
-        csvstr += "%s," % item
-    #guard to make sure string not empty (if list empty)
-    if len(csvstr) > 0:
-        #remove trailing ,
-        csvstr = csvstr[:-1]
+    csvstr = ",".join(iterable)
+    # for item in iterable:
+    #     csvstr += "%s," % item
+    # #guard to make sure string not empty (if list empty)
+    # if len(csvstr) > 0:
+    #     #remove trailing ,
+    #     csvstr = csvstr[:-1]
     return csvstr
 
+def barstr2csvstr(barstr):
+    csvstr = barstr.replace('|', ',')
+    return csvstr
+
+
+def submission_handler(retry, data):
+    res = None
+    #+1 for initial try
+    for i in range(retry + 1):
+        #need gene_name, alt_names, description, platform, id
+        res = submit_to_api(data)
+        if res["success"]:
+            break
+
+    return res
+
+
+
+def write_log(failed, gpl, gene_id_cols, out_file_gpl, out_file_row, success_count, error_count, row_errors, gpl_lock, row_lock):
+    with gpl_lock:
+        id_cols_str = iterable2csvstr(gene_id_cols)
+        with open(out_file_gpl, "a") as f:
+            f.write("%s,true,\"%s\",%d,%d,%s\n" % (gpl, id_cols_str, success_count, error_count, failed))
+
+    with row_lock:
+        with open(out_file_row, "a") as f:
+            for error in row_errors:
+                f.write("%s,%d,%d,%s\n" % (gpl, *error))
+
+
 #"gpl,table_valid,id_cols,successes,errors,ingestion_failed"
-#"gpl,row,error_type"
-def getData(gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, translator):
+#"gpl,row,error_type,message"
+def getData(gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, translator, t_max):
 
     success_count = 0
     error_count = 0
     row_errors = []
-
-    def write_log(failed):
-        with gpl_lock:
-            id_cols_str = iterable2csvstr(gene_id_cols)
-            with open(out_file_gpl, "a") as f:
-                f.write("%s,true,\"%s\",%d,%d,%s\n" % (gpl, id_cols_str, success_count, error_count, failed))
-    
-        with row_lock:
-            with open(out_file_row, "a") as f:
-                for error in row_errors:
-                    f.write("%s,%d,%d,%s\n" % (gpl, *error))
+    row_futures = []
+    gene_id_cols = []
 
     try:
         gpl_data = GEOparse.get_GEO(geo = gpl, destdir = cache, silent = True)
@@ -151,7 +172,7 @@ def getData(gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, t
         table = gpl_data.table
 
         ref_id_col = "ID"
-        gene_id_cols = platform_processor.get_id_cols_and_validate(table)
+        gene_id_cols = platform_processor_local.get_id_cols_and_validate(table)
         if gene_id_cols is None:
             with gpl_lock:
                 with open(out_file_gpl, "a") as f:
@@ -163,38 +184,17 @@ def getData(gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, t
                     f.write("%s,true,\"\",,,false\n" % gpl)
             return
 
-        
+        t_executor = ThreadPoolExecutor(t_max)
 
         for index, row in table.iterrows():
-            gene_id_col = None
-            value = None
-            #get first id col with a value
-            for gene_id_col in gene_id_cols:
-                if row.get(gene_id_col) is not None:
-                    value = row[gene_id_col]
-                    break
-            #apparently empty fields come out as NaN, use string conversion to prevent type errors, and keep None check just in case
-            if str(value) == "nan" or value is None:
-                continue
-
-            ref_id = row[ref_id_col]
-            value = row[gene_id_col]
-            parsed = platform_processor.parse_id_col(value, gene_id_col)
-            gb_acc = platform_processor.translate_to_acc(parsed, gene_id_col, translator)
-            gene_info = translator.translate_acc(gb_acc)
-
-            #add gpl
-            if len(gene_info) > 1:
-                row_errors.append((index, ErrorCodes.multi_res, ""))
-                error_count += 1
-                continue
-
-            if len(gene_info) < 1:
+            
+            gene_info = platform_processor_local.get_gene_info_from_row(row, gene_id_cols)
+            ref_id = row.get(ref_id_col)
+            
+            if gene_info is None:
                 row_errors.append((index, ErrorCodes.no_res, ""))
                 error_count += 1
                 continue
-
-            gene_info = gene_info[0]
 
             data = {
                 "gene_symbol": gene_info.get("gene_symbol"),
@@ -204,17 +204,21 @@ def getData(gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, t
                 "ref_id": ref_id
             }
 
-            #convert gene synonym list to comma separated string
+            #db file contains bar separated style list, replaces with csv style
             if data["gene_synonyms"] is not None:
-                data["gene_synonyms"] = iterable2csvstr(data["gene_synonyms"])
+                data["gene_synonyms"] = barstr2csvstr(data["gene_synonyms"])
+            
+            future = t_executor.submit(submission_handler, retry, data)
+            row_futures.append(future)
+            
 
-            res = None
-            #+1 for initial try
-            for i in range(retry + 1):
-                #need gene_name, alt_names, description, platform, id
-                res = submit_to_api(data)
-                if res["success"]:
-                    break
+        #synchronize and get results
+        for future in as_completed(row_futures):
+            e = future.exception()
+            if e is not None:
+                #just throw the error, something odd happened since request errors should be caught
+                raise e
+            res = future.result()
 
             if not res["success"]:
                 ecode = res["status"]
@@ -225,11 +229,13 @@ def getData(gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, t
             else:
                 success_count += 1
 
-        write_log("false")
+        t_executor.shutdown(True)
+
+        write_log("false", gpl, gene_id_cols, out_file_gpl, out_file_row, success_count, error_count, row_errors, gpl_lock, row_lock)
             
     except Exception as e:
         print(traceback.format_exc(), file = sys.stderr)
-        write_log("true")
+        write_log("true", gpl, gene_id_cols, out_file_gpl, out_file_row, success_count, error_count, row_errors, gpl_lock, row_lock)
         exit(1)
 
 
@@ -265,8 +271,15 @@ def main():
     dbf = config.get("dbf")
     cache = config.get("cache")
     p_max = config.get("p_max")
+    t_max = config.get("t_max")
+    #main process basically idle waiting for children so no need to subtract one for it
     if p_max < 1:
-        p_max = multiprocessing.cpu_count()
+        #make sure at least one in case of issue with count
+        p_max = max(multiprocessing.cpu_count(), 1)
+    if t_max < 1:
+        #subtract 1 because main thread still processing
+        #make sure at least one though
+        t_max = max(multiprocessing.cpu_count() - 1, 1)
     retry = config.get("retry")
     out_file_gpl = config.get("out_file_gpl")
     out_file_row = config.get("out_file_row")
@@ -326,7 +339,7 @@ def main():
 
             for ids in res:
                 gpl = ids[0]
-                p_executor.submit(getData, gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, translator)
+                p_executor.submit(getData, gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, translator, t_max)
 
             p_executor.shutdown(True)
 

@@ -18,7 +18,7 @@ import sqlite3
 
 db_file = "genedb.sqlite"
 
-con = sqlite3.connect()
+con = sqlite3.connect(db_file)
 cur = con.cursor()
 
 
@@ -47,7 +47,7 @@ acceptable_fields = {"GENE_ID", "GI", "PT_GI", "GI_RANGE", "GI_LIST", "PT_GI_LIS
 
 #other_standard_fields = []
 
-required = ["ID"]
+required = "ID"
 
 
 
@@ -96,23 +96,31 @@ parse_map = generate_parse_map()
 # genomic_nucleotide_accession nuc refseq || genbank
 #protein and nucleotide gis should be unique between refseq and genbank types, so shouldn't have an issue with conflicting mappings
 
+
+
 def generate_col_map():
+    nuc_id = ["genomic_nucleotide_gi", "rna_nucleotide_gi"]
+    nuc_acc = ["genomic_nucleotide_accession", "rna_nucleotide_accession"]
+    prot_id = ["protein_gi", "mature_peptide_gi"]
+    prot_acc = ["protein_accession", "mature_peptide_accession"]
+    gene_id = ["gene_id"]
+
     col_map = {
-        "GI": ["genomic_nucleotide_gi", "rna_nucleotide_gi"],
-        "PT_GI": ["protein_gi", "mature_peptide_gi"],
-        "GI_RANGE": ["genomic_nucleotide_gi", "rna_nucleotide_gi"],
-        "GI_LIST": ["genomic_nucleotide_gi", "rna_nucleotide_gi"],
-        "PT_GI_LIST": ["protein_gi", "mature_peptide_gi"],
-        "GB_ACC": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
-        "PT_ACC": ["protein_accession", "mature_peptide_accession"],
-        "RANGE_GB": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
-        "GB_RANGE": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
-        "GB_LIST": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
-        "PT_LIST": ["protein_accession", "mature_peptide_accession"],
+        "GI": nuc_id,
+        "PT_GI": prot_id,
+        "GI_RANGE": nuc_id,
+        "GI_LIST": nuc_id,
+        "PT_GI_LIST": prot_id,
+        "GB_ACC": nuc_acc,
+        "PT_ACC": prot_acc,
+        "RANGE_GB": nuc_acc,
+        "GB_RANGE": nuc_acc,
+        "GB_LIST": nuc_acc,
+        "PT_LIST": prot_acc,
         #documentation says can be genbank or refseq, example and gene database field name seem to suggest nucleotide, so allow nucleotide accession types
-        "GENOME_ACC": ["genomic_nucleotide_accession", "rna_nucleotide_accession"],
+        "GENOME_ACC": nuc_acc,
         #non-standard field, but appears to be fairly common and should be standard format
-        "GENE_ID": ["gene_id"]
+        "GENE_ID": gene_id
     }
     return col_map
 
@@ -127,19 +135,39 @@ col_map = generate_col_map()
 #return None if invalid or no standard field in list of usable ids found
 def get_id_cols_and_validate(table):
     gene_id_cols = []
-    for field in required:
-        if field not in table.columns:
-            return None
-    #push preferred fields first
-    for field in table.columns:
-        if field in acceptable_fields_preferred:
-            gene_id_cols.append(field)
+    found_id = False
 
     for field in table.columns:
         if field in acceptable_fields:
             gene_id_cols.append(field)
+        elif field == "ID":
+            found_id = True
 
-    return gene_id_cols
+    return None if not found_id else gene_id_cols
+
+
+def get_gene_info_from_row(row, id_cols):
+    col = None
+    value = None
+    #get first id col with a value
+    for col in id_cols:
+        value = row.get(col)
+        #apparently empty fields come out as NaN, use string conversion to prevent type errors, and keep None check just in case
+        #note sql empty fields come out as None, this is for the GEOparse package stuff
+        if str(value) != "nan" and value is not None:
+            break
+    #didn't find any mappable values in the row
+    if str(value) == "nan" or value is None:
+        return None
+
+    parsed_value = parse_id_col(value, col)
+    gene_id = get_gene_id_from_gpl(col, parsed_value)
+    #no mapping
+    if gene_id is None:
+        return None
+    gene_info = get_gene_info_from_id(gene_id)
+
+    return gene_info
 
 
 
@@ -155,7 +183,16 @@ def parse_id_col(value, col):
 def get_gene_info_from_id(gene_id):
     query = "SELECT gene_symbol, synonyms, description FROM gene_info WHERE gene_id == %s" % gene_id
     cur.execute(query)
-    return cur.fetchone()
+    #transform to dict
+    res = cur.fetchone()
+    if res is None:
+        return None
+    res_dict = {
+        "gene_symbol": res[0],
+        "gene_synonyms": res[1],
+        "gene_description": res[2]
+    }
+    return res_dict
     
 #remember to clean value first
 def get_gene_id_from_gpl(gpl_col, value):
@@ -174,11 +211,16 @@ def get_gene_id_from_gpl(gpl_col, value):
 
     where_clauses = []
     for db_col in db_cols:
-        where_clauses.apend(get_where_clause(db_col))
+        where_clauses.append(get_where_clause(db_col))
 
-    query = "SELECT gene_id FROM gene2accession WHERE %s" % "OR ".join(where_clauses)
+    query = "SELECT gene_id FROM gene2accession WHERE %s" % " OR ".join(where_clauses)
     cur.execute(query)
-    return cur.fetchone()[0]
+    res = cur.fetchone()
+    if res is not None:
+        print(query)
+        #should be a one length list (the gene_id col result)
+        res = res[0]
+    return res
 
 
 
