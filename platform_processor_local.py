@@ -197,7 +197,7 @@ def get_gene_info_from_id(gene_id):
 #remember to clean value first
 def get_gene_id_from_gpl(gpl_col, value):
     #already have gene id
-    if gpl_col is "GENE_ID":
+    if gpl_col == "GENE_ID":
         return value
     db_cols = col_map.get(gpl_col)
     if db_cols is None:
@@ -217,7 +217,6 @@ def get_gene_id_from_gpl(gpl_col, value):
     cur.execute(query)
     res = cur.fetchone()
     if res is not None:
-        print(query)
         #should be a one length list (the gene_id col result)
         res = res[0]
     return res

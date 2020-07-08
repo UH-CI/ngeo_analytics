@@ -158,7 +158,7 @@ def write_log(failed, gpl, gene_id_cols, out_file_gpl, out_file_row, success_cou
 
 #"gpl,table_valid,id_cols,successes,errors,ingestion_failed"
 #"gpl,row,error_type,message"
-def getData(gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, translator, t_max):
+def getData(gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, t_max):
 
     success_count = 0
     error_count = 0
@@ -283,7 +283,6 @@ def main():
     retry = config.get("retry")
     out_file_gpl = config.get("out_file_gpl")
     out_file_row = config.get("out_file_row")
-    entrez_config = config.get("entrez")
 
     with open(out_file_gpl, "w") as f:
         #header for output csv
@@ -331,15 +330,13 @@ def main():
         with CoordManager() as manager:
             gpl_lock = manager.Lock()
             row_lock = manager.Lock()
-            req_handler = manager.EntrezRequestHandler(entrez_config.get("email"), entrez_config.get("tool_name"), entrez_config.get("api_token"))
-            translator = manager.PlatformFieldTranslator(req_handler)
 
             # req_handler = id_translator.EntrezRequestHandler(entrez_config.get("email"), entrez_config.get("tool_name"), entrez_config.get("api_token"))
             # translator = id_translator.PlatformFieldTranslator(req_handler)
 
             for ids in res:
                 gpl = ids[0]
-                p_executor.submit(getData, gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, translator, t_max)
+                p_executor.submit(getData, gpl, cache, retry, out_file_gpl, out_file_row, gpl_lock, row_lock, t_max)
 
             p_executor.shutdown(True)
 
