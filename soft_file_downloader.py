@@ -7,6 +7,7 @@ import zlib
 import csv
 import soft_parser
 import time
+import GEOparse
 
 
 #threadsafe
@@ -24,6 +25,7 @@ class CircularRWBuffer():
 
     def write(self, data):
         write_size = len(data)
+        print(write_size)
         #a lot of things mess with state consistency, so just lock everything
         self.access_lock.acquire()
         #overflow, resize buffer and try again
@@ -65,22 +67,38 @@ class CircularRWBuffer():
         self.access_lock.release()
 
 
-    def read(self, read_size = None, block = True):
-
-        #block and wait for data if none present, block is true, and data not finished
-        if block and not self.complete:
-            self.data_block.wait()
+    def read(self, read_size = None, block = True, timeout = None):
 
         #a lot of things mess with state consistency, so just lock everything
         self.access_lock.acquire()
+        #block and wait for data if none present, block is true, and data not finished
+        if block and not self.complete:
+            #data block might be set if read waiting for more data, let me through if enough data for me
+            #could lead to resource starving if one reader waiting on a lot of data, not an issue for this though (and can use timeout if need)
+            if self.size == 0 or (read_size is not None and read_size > self.size):
+                self.access_lock.release()
+                if not self.data_block.wait(timeout):
+                    raise TimeoutError("Read request timed out")
+                self.access_lock.acquire()
+
 
         #data is finished and all read, return empty
         if self.complete and self.size == 0:
             self.access_lock.release()
             return bytes()
         
-        if read_size is None or read_size > self.size:
+        #need to block until proper number of bytes ready!!! (issue is probably that read expects n bytes and providing less because it's ready)
+        #only provide < asked for bytes if eof (data stream complete)
+
+        #if not blocking then just read what's there
+        if read_size is None or (read_size > self.size and (self.complete or not block)):
             read_size = self.size
+        #set data block and retry read, should go through after more data written (note only can trigger if block is true, otherwise caught by if condition)
+        elif read_size > self.size:
+            self.data_block.clear()
+            self.access_lock.release()
+            return self.read(read_size, block, timeout)
+        
         
         data = bytearray(read_size)
         #wrap around
@@ -108,11 +126,13 @@ class CircularRWBuffer():
 
 
     def __resize(self):
+        print("resize")
         temp = self.buf
         temp_size = self.max_size
         self.max_size *= 2
         self.buf = bytearray(self.max_size)
         self.__transfer(temp, temp_size, self.buf)
+        temp = None
 
     def __transfer(self, old, old_size, new):
         #wrapped around
@@ -184,9 +204,8 @@ def process_platform(accession, acc_type):
     # writer = raw
     # reader = io.BytesIO(writer.getbuffer())
 
-    #edge case issue? looks like problem if buffer init size equal to chunk size or small multiple
-    #probably an issue if buffer exactly full
-    stream = CircularRWBuffer(1024)
+    #256KB starting buffer
+    stream = CircularRWBuffer(262144)
     # stream = io.BytesIO()
 
 
@@ -200,7 +219,7 @@ def process_platform(accession, acc_type):
     
     #daemon thread stops extra data after table from tying up process
     #better way to do this? do we need resource cleanup?
-    t = threading.Thread(target = retr_data, args = (resource, stream, 2048), daemon = True)
+    t = threading.Thread(target = retr_data, args = (resource, stream, 4096), daemon = True)
     t.start()
 
     # retr_data(resource, stream, 4096)
@@ -216,8 +235,10 @@ def process_platform(accession, acc_type):
     end = time.time()
     print(end - start)
 
+    
+
     #might have data after finished reading table, should end process and add some sort of stream cleanup
-    # t.join()
+    t.join()
     # print("joined")
     
 
@@ -247,22 +268,42 @@ def process_platform(accession, acc_type):
     # for line in gz:
     #     print(line)
         
-
+def comp_test(accession):
+    start = time.time()
+    gpl_data = GEOparse.get_GEO(geo = accession, destdir = "./cache", silent = True)
+    table = gpl_data.table
+    for line in table:
+        if(len(line) == 10000000000):
+            print("loooooong")
+    end = time.time()
+    print(end - start)
     
 def test_driver():
     s = b"the quick brown fox jumps over the lazy dog"
 
     stream = CircularRWBuffer(10)
 
-    stream.write(s[0:4])
-    print(stream.read())
-    stream.write(s[4:10])
-    stream.write(s[10:12])
+    stream.write(s[0:30])
+    # stream.write(s[10:20])
     print(stream.read(2))
-    stream.write(s[12:15])
-    print(stream.read(2))
-    stream.write(s[15:])
     print(stream.read())
+    # stream.write(s[20:30])
+    #deadlock if block true and no timeout
+    print(stream.read(500, True, 10))
+    stream.write(s[30:])
+    stream.end_of_data()
+    print(stream.read(500))
+    
+    # print(stream.read(100))
+    # stream.write(s[0:4])
+    # print(stream.read())
+    # stream.write(s[4:10])
+    # stream.write(s[10:12])
+    # print(stream.read(2))
+    # stream.write(s[12:15])
+    # print(stream.read(2))
+    # stream.write(s[15:])
+    # print(stream.read())
     # stream.write(s[0:7])
     # print(stream.read())
     # stream.write(s[7:15])
@@ -272,7 +313,9 @@ def test_driver():
 
 
 #test_driver()
-process_platform("GPL7", "platform")
+acc = "GPL5275"
+process_platform(acc, "platform")
+comp_test(acc)
 
 
 
