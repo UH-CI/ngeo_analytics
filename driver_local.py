@@ -2,21 +2,8 @@
 
 import sqlite3 as sql
 from sqlite3 import Error
-
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-
 import sys, os
-
-# #has to be before rpy2 imports
-# os.environ["R_HOME"] = "E:/R/R-3.6.3" #path to R installation
-# os.environ["R_USER"] = "C:/Users/Jard/AppData/Local/Programs/Python/Python35/Lib/site-packages/rpy2" #python rpy2 package path
-
-# from rpy2.robjects import r as R
-# #note, requires numpy <= 1.16.4 to work with newest windows rpy2 version
-# from rpy2.robjects import pandas2ri
-
-# from rpy2.robjects.packages import importr
-
 import platform_processor_local
 import GEOparse
 import json
