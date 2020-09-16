@@ -15,26 +15,20 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, String, exc
 from time import sleep
 import random
-import ftp_downloader
-import ftp_manager
 
 Base = declarative_base()
 
 #primary key should be gpl ref_id
 class GPLRef(Base):
     __tablename__="gene_gpl_ref"
-    gene_id = Column(String)
-    ref_id = Column(String, primary_key=True)
     gpl = Column(String, primary_key=True)
-
-ftp_base = "ftp.ncbi.nlm.nih.gov"
-#how many heartbeat threads?
-heartbeat_threads = 2
-#global manager
-manager = ftp_manager.FTPManager(ftp_base, heartbeat_threads = heartbeat_threads)
+    ref_id = Column(String, primary_key=True)
+    gene_id = Column(String)
+    
 
 
-def submit_db_batch(gpl, engine, batch, retry, delay = 0):
+
+def submit_db_batch(engine, batch, retry, delay = 0):
     error = None
     if retry < 0:
         error = Exception("Retry limit exceeded")
@@ -59,7 +53,7 @@ def submit_db_batch(gpl, engine, batch, retry, delay = 0):
                 else:
                     backoff = delay * 2 + random.uniform(0, delay)
                 #retry with one less retry remaining and current backoff
-                error = submit_db_batch(gpl, engine, batch, retry - 1, backoff)
+                error = submit_db_batch(engine, batch, retry - 1, backoff)
             #something else went wrong, log exception and add to failures
             else:
                 error = e
@@ -68,30 +62,52 @@ def submit_db_batch(gpl, engine, batch, retry, delay = 0):
             error = e
         return error
         
-
+def handle_batch(engine, batch, retry):
+    error = submit_db_batch(engine, batch, retry)
+                if error is not None:
+                    with error_lock:
+                        #write out items in batch (no need to redo translations etc)
+                        pass
+                
 
 #log gpl failures, errors, and no translations
-def handle_gpl(gpl, engine, batch_size, failure_lock, error_lock, nt_lock):
+def handle_gpl(gpl, ftp_handler, engine, batch_size, failure_lock, error_lock, nt_lock):
     global manager
     retry = 5
-    batch = []
-    #row and header handlers
-    def handle_header(header):
-        pass
-    def handle_row(row):
+    batch = [] 
+    
+    #(id_col, [translation_cols])
+    header_info = None
+    def handle_row(header, row):
         nonlocal batch
-        #process row into field ref dict
-        fields = {}
-        batch.append(fields)
-        if len(batch) % batch_size == 0:
-            error = submit_db_batch(gpl, engine, batch, retry)
-            if error is not None:
-                with error_lock:
-                    #write out items in batch (no need to redo translations etc)
-                    pass
-            batch = []
+        nonlocal header_info
+        
+        if header_info is None:
+            header_info = get_id_cols_and_validate(header)
+            #no id column or translatable columns were found, return false to terminate reading
+            if header_info[0] is None or len(header_info[1]) == 0:
+                return False
 
-    ftp_downloader.get_gpl_data_stream(manager, gpl, )
+        gene_id = get_gene_id_from_row(header, row, header_info[1])
+        #check if a gene_id was found
+        if gene_id is not None:
+            #process row into field ref dict
+            fields = {
+                "gpl": gpl,
+                "ref_id": header[header_info[0]]
+                "gene_id": gene_id
+            }
+            batch.append(fields)
+            if len(batch) % batch_size == 0:
+                handle_batch(engine, batch, retry)
+                batch = []
+                
+        #continue to next row
+        return True
+
+    ftp_handler.process_gpl_data(gpl, handle_row)
+    #submit anything leftover in the last batch
+    handle_batch(engine, batch, retry)
 
 
     
@@ -231,22 +247,24 @@ col_map = generate_col_map()
 #use field indices for efficiency
 def get_id_cols_and_validate(header):
     gene_id_cols = []
-    found_id = False
+    id_col = None
     for i in range(len(header)):
         field = header[i]
+        #convert to upper case just in case case convention not followed
+        field = field.upper()
         if field in acceptable_fields:
             gene_id_cols.append(i)
         elif field == "ID":
-            found_id = True
+            id_col = i
 
-    return None if not found_id else gene_id_cols
-
-
+    return (id_col, gene_id_cols)
 
 
 
 
-def get_gene_id_from_row(row, id_col_indices):
+
+
+def get_gene_id_from_row(header, row, id_col_indices):
     col = None
     value = None
     #get first id col with a value
@@ -257,6 +275,9 @@ def get_gene_id_from_row(row, id_col_indices):
         #are empty values "" or "-"? Just catch either
         if candidate != "" and candidate != "-":
             value = candidate
+            col = header[i]
+            #convert to upper case just in case case convention not followed
+            col = col.upper()
             break
     #didn't find any mappable values in the row
     if value is None:

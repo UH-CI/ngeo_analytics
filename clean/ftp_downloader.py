@@ -277,8 +277,7 @@ def get_data_stream_from_resource(ftp, resource, data_processor):
 
     term_flag = threading.Event()
     
-    #daemon thread stops extra data after table from tying up process
-    #better way to do this? do we need resource cleanup?
+    #daemon thread stops thread if parent exit
     t = threading.Thread(target = retr_data, args = (ftp, resource, stream, 4096, term_flag), daemon = True)
     t.start()
 
