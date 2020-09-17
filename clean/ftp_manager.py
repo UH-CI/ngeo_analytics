@@ -96,10 +96,8 @@ class FTPConnection():
 
 class FTPManager:
 
-    def __init__(self, uri, init_cons = 10, heartrate = 2, heartbeat_threads = None):
+    def __init__(self, uri, max_cons = 1000, min_cons = 10, init_cons = 10, heartrate = 2, heartbeat_threads = None):
         #accessing static variables from constructor is weird because pythons a wonderful language, so just define these here
-        MIN_CONS = 10
-        MAX_CONS = 1000
         #if only 5 connections left prepare some more
         BUFFER_CONS = 5
         #if more than 10 connections to spare start removing some
@@ -110,17 +108,17 @@ class FTPManager:
         if CPUS is None:
             CPUS = 3
 
-        if init_cons < MIN_CONS:
-            init_cons = MIN_CONS
-        elif init_cons > MAX_CONS:
-            init_cons = MAX_CONS
+        if init_cons < min_cons:
+            init_cons = min_cons
+        elif init_cons > max_cons:
+            init_cons = max_cons
         if heartrate <= MIN_HEARTRATE:
             heartrate = MIN_HEARTRATE
 
         self.prune_buffer = PRUNE_BUFFER
         self.buffer_cons = BUFFER_CONS
-        self.min_cons = MIN_CONS
-        self.max_cons = MAX_CONS
+        self.min_cons = min_cons
+        self.max_cons = max_cons
 
         if heartbeat_threads is None:
             self.heartbeat_threads = CPUS
@@ -148,7 +146,7 @@ class FTPManager:
         startup_t = threading.Thread(target = staggered_cons, args = (init_cons - 1, 5,), daemon = True)
 
         self.ended = threading.Event()
-        self.all_busy = threading.Semaphore(MAX_CONS)
+        self.all_busy = threading.Semaphore(max_cons)
         
         #heartbeat thread to ensure connections stay alive
         heartbeat = threading.Thread(target = self.__heartbeat, daemon = True)

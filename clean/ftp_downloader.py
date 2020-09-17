@@ -197,8 +197,8 @@ def get_gpl_data_stream(ftp, gpl, data_processor):
 
     file_suffix = "_family.soft.gz"
     fname = "%s%s" % (gpl, file_suffix)
-
     resource_dir = get_resource_dir(gpl, resource_details)
+    resource = "%s%s" % (resource_dir, fname)
     files = None
     #verify resource exists and thow exception if it doesn't
     try:
@@ -206,10 +206,8 @@ def get_gpl_data_stream(ftp, gpl, data_processor):
     #if permanent error response should be resource not found
     except ftplib.error_perm:
         raise Exception("Resource dir not found %s" % resource_dir)
-    if fname not in files:
-        raise Exception("Resource not found in dir %s" % resource_dir)
-    
-    resource = "%s%s" % (resource_dir, fname)
+    if resource not in files:
+        raise Exception("Resource not found %s" % resource)
 
     get_data_stream_from_resource(ftp, resource, data_processor)
 
@@ -259,7 +257,10 @@ def retr_data(ftp, resource, stream, blocksize, term_flag):
         #check if should terminate
         if(term_flag.is_set()):
             #try to abort file transfer
-            ftp.abort()
+            try:
+                ftp.abort()
+            except ftplib.all_errors:
+                pass
             #end data stream
             stream.end_of_data()
             #terminate thread

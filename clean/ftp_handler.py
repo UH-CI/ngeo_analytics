@@ -6,7 +6,6 @@ import math
 import ftplib
 from ftp_manager import FTPManager
 import ftp_downloader
-from ftp_handler import FTPHandler
 
 
 
@@ -46,9 +45,6 @@ class FTPHandler:
             self.parse_data_table_gz(file, table_start, table_end, row_handler)
         return _data_processor
 
-    #IF HAVING ISSUES WITH EXCEEDING RETRY LIMIT SHOULD JUST ADD METHOD TO RECONNECT CONNECTION BEING USED AND USE SAME ONE RATHER THAN GETTING ANOTHER FROM THE POOL
-    #OR CAN TRY INCREASE HEARTRATE
-
     #shouldn't need a delay on retry, just getting another connection from the pool
     def process_gpl_data(self, gpl, row_handler, retry):
         if retry < 0:
@@ -70,6 +66,6 @@ class FTPHandler:
         self.manager.release_con(ftp_con, problem)
         #check if there was a problem and retry with a new connection if there was
         if problem:
-            self.process_gpl_data(gpl, retry - 1)
+            self.process_gpl_data(gpl, row_handler, retry - 1)
 
 

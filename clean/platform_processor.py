@@ -1,26 +1,16 @@
-# class PlatformTableHandler:
 
-#     #groupings
-#     #
-
-#     #lets start with GB_ACC only then add others, GB_ACC seems the most common
-
-
-#     #organism on sample, what does it look like if multi-organism?
-
-#     #only using single id fields
-
-#     #will all of these work?
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, String, exc
 from time import sleep
 import random
+import re
+import sqlite3
 
 Base = declarative_base()
 
 #primary key should be gpl ref_id
 class GPLRef(Base):
-    __tablename__="gene_gpl_ref"
+    __tablename__="gene_gpl_ref_new"
     gpl = Column(String, primary_key=True)
     ref_id = Column(String, primary_key=True)
     gene_id = Column(String)
@@ -62,18 +52,15 @@ def submit_db_batch(engine, batch, retry, delay = 0):
             error = e
         return error
         
-def handle_batch(engine, batch, retry):
+def handle_batch(engine, batch, retry, failure_handler, error_handler):
     error = submit_db_batch(engine, batch, retry)
-                if error is not None:
-                    with error_lock:
-                        #write out items in batch (no need to redo translations etc)
-                        pass
+    if error is not None:
+        error_handler(error)
+        failure_handler(batch)
                 
 
 #log gpl failures, errors, and no translations
-def handle_gpl(gpl, ftp_handler, engine, batch_size, failure_lock, error_lock, nt_lock):
-    global manager
-    retry = 5
+def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size, failure_handler, error_handler, nt_handler):
     batch = [] 
     
     #(id_col, [translation_cols])
@@ -86,28 +73,42 @@ def handle_gpl(gpl, ftp_handler, engine, batch_size, failure_lock, error_lock, n
             header_info = get_id_cols_and_validate(header)
             #no id column or translatable columns were found, return false to terminate reading
             if header_info[0] is None or len(header_info[1]) == 0:
+                nt_handler(gpl)
                 return False
 
-        gene_id = get_gene_id_from_row(header, row, header_info[1])
+        gene_id = get_gene_id_from_row(header, row, header_info[1], g2a_db)
+        ref_id = row[header_info[0]]
         #check if a gene_id was found
         if gene_id is not None:
             #process row into field ref dict
             fields = {
                 "gpl": gpl,
-                "ref_id": header[header_info[0]]
+                "ref_id": ref_id,
                 "gene_id": gene_id
             }
             batch.append(fields)
             if len(batch) % batch_size == 0:
-                handle_batch(engine, batch, retry)
+                handle_batch(engine, batch, db_retry, failure_handler, error_handler)
                 batch = []
+        else:
+            nt_handler(gpl, ref_id)
                 
         #continue to next row
         return True
-
-    ftp_handler.process_gpl_data(gpl, handle_row)
-    #submit anything leftover in the last batch
-    handle_batch(engine, batch, retry)
+    try:
+        ftp_handler.process_gpl_data(gpl, handle_row, ftp_retry)
+        #submit anything leftover in the last batch
+        handle_batch(engine, batch, db_retry, failure_handler, error_handler)
+    except RuntimeError as e:
+        error_handler(e)
+        #log entire gpl as failure by just putting in single entry with empty ref id and gene_id
+        #assume that couldn't get connection and whole gpl failed, but should check since hard to garentee
+        failure_handler([{
+            "gpl": gpl,
+            "ref_id": "",
+            "gene_id": ""
+        }])
+    
 
 
     
@@ -118,8 +119,6 @@ def handle_gpl(gpl, ftp_handler, engine, batch_size, failure_lock, error_lock, n
 
 
 
-import re
-import sqlite3
 
 
 
@@ -127,10 +126,6 @@ import sqlite3
 
 
 
-db_file = "genedb.sqlite"
-
-con = sqlite3.connect(db_file)
-cur = con.cursor()
 
 
 #might have to be accession
@@ -264,7 +259,7 @@ def get_id_cols_and_validate(header):
 
 
 
-def get_gene_id_from_row(header, row, id_col_indices):
+def get_gene_id_from_row(header, row, id_col_indices, g2a_db):
     col = None
     value = None
     #get first id col with a value
@@ -285,7 +280,7 @@ def get_gene_id_from_row(header, row, id_col_indices):
     #parse the value according to the rules set for the column type
     parsed_value = parse_id_col(value, col)
     #map value to gene id
-    gene_id = get_gene_id_from_gpl(col, parsed_value)
+    gene_id = get_gene_id_from_gpl(col, parsed_value, g2a_db)
     return gene_id
 
 
@@ -301,7 +296,9 @@ def parse_id_col(value, col):
 
     
 #remember to clean value first
-def get_gene_id_from_gpl(gpl_col, value):
+def get_gene_id_from_gpl(gpl_col, value, g2a_db):
+    con = sqlite3.connect(g2a_db)
+    cur = con.cursor()
     #already have gene id
     if gpl_col == "GENE_ID":
         return value
@@ -313,7 +310,7 @@ def get_gene_id_from_gpl(gpl_col, value):
         if gpl_col in accessions:
             return "%s GLOB '%s[.]*'" % (db_col, value)
         else:
-            return "%s == '%s'" % (db_col, value)
+            return "%s = '%s'" % (db_col, value)
 
     where_clauses = []
     for db_col in db_cols:
