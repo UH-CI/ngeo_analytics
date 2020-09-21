@@ -1,7 +1,7 @@
 import sqlite3
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from multiprocessing import Manager
-from sys import stderr, argv
+from sys import stderr, argv, exit
 import platform_processor
 from ftp_handler import FTPHandler
 import db_connect
@@ -125,6 +125,7 @@ def handle_batch(batch, p_exec, failure_lock, error_lock, nt_lock):
         e = f.exception()
         if e is not None:
             print(e, file = stderr)
+            exit()
         batches_complete += 1
         print("Completed %d batches" % batches_complete)
     f.add_done_callback(cb)
