@@ -1,3 +1,3 @@
-sqlachemy
-pymysql
-SSHTunnelForwarder
+SQLAlchemy==1.3.17
+PyMySQL==0.9.3
+sshtunnel==0.1.5

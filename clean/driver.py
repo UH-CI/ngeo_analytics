@@ -9,8 +9,15 @@ import json
 from os import cpu_count
 from sqlalchemy import text
 
+config_file = "config.json"
+if len(argv) > 1:
+    config_file = argv[1]
+config = None
+with open(config_file) as f:
+    config = json.load(f)
+
 def create_table():
-    engine = db_connect.get_db_engine()
+    engine = db_connect.get_db_engine(config["extern_db_config"])
     try:
         query = text("""CREATE TABLE IF NOT EXISTS gene_gpl_ref_new (
             gpl TEXT NOT NULL,
@@ -25,11 +32,6 @@ def create_table():
     finally:
         db_connect.cleanup_db_engine()
 
-
-config_file = argv[1]
-config = None
-with open(config_file) as f:
-    config = json.load(f)
 
 def nt_handler(lock):
     fname = config["out_files"]["nt_log"]
@@ -59,9 +61,6 @@ def failure_handler(lock):
     return _failure_handler
 
 def init_logs():
-    fname = config["out_files"]["nt_log"]
-    with open(fname, "w") as f:
-        f.write("gpl,ref_id\n")
     fname = config["out_files"]["error_log"]
     with open(fname, "w") as f:
         f.write("")
@@ -93,7 +92,7 @@ def process_batch(batch, failure_lock, error_lock, nt_lock):
     #want one handler (one ftp manager) for all threads, should be threadsafe
     ftp_handler = FTPHandler(ftp_base, ftp_opts)
     #also one engine for all threads
-    engine = db_connect.get_db_engine()
+    engine = db_connect.get_db_engine(config["extern_db_config"])
     insert_batch_size = config["insert_batch_size"]
     db_retry = config["db_retry"]
     ftp_retry = config["ftp_retry"]

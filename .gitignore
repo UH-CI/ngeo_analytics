@@ -1,5 +1,6 @@
 entrez_config.json
 config.json
+db_config.json
 cache
 *.sqlite*
 *.gz

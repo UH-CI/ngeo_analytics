@@ -3,12 +3,12 @@
 import sqlalchemy
 import json
 
-config_file = "db_config.json"
+default_config_file = "config.json"
 
 engine = None
 tunnel = None
 
-def get_db_engine():
+def get_db_engine(config = None):
 
     global engine
     global tunnel
@@ -16,9 +16,9 @@ def get_db_engine():
     if engine is not None:
         return engine
 
-    config = None
-    with open(config_file) as f:
-        config = json.load(f)
+    if config is None:
+        with open(default_config_file) as f:
+            config = json.load(f)["extern_db_config"]
 
     
     if config["tunnel"]["use_tunnel"]:    

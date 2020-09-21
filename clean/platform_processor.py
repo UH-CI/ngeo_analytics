@@ -60,7 +60,7 @@ def handle_batch(engine, batch, retry, failure_handler, error_handler):
                 
 
 #log gpl failures, errors, and no translations
-def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size, failure_handler, error_handler, nt_handler):
+def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size, failure_handler, error_handler):
     batch = [] 
     
     #(id_col, [translation_cols])
@@ -73,7 +73,6 @@ def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size
             header_info = get_id_cols_and_validate(header)
             #no id column or translatable columns were found, return false to terminate reading
             if header_info[0] is None or len(header_info[1]) == 0:
-                nt_handler(gpl)
                 return False
 
         gene_id = get_gene_id_from_row(header, row, header_info[1], g2a_db)
@@ -90,8 +89,6 @@ def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size
             if len(batch) % batch_size == 0:
                 handle_batch(engine, batch, db_retry, failure_handler, error_handler)
                 batch = []
-        else:
-            nt_handler(gpl, ref_id)
                 
         #continue to next row
         return True
