@@ -1,21 +1,9 @@
-
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, String, exc
+from sqlalchemy import exc, text
 from time import sleep
 import random
 import re
 import sqlite3
-
-Base = declarative_base()
-
-#primary key should be gpl ref_id
-class GPLRef(Base):
-    __tablename__="gene_gpl_ref_new"
-    gpl = Column(String, primary_key=True)
-    ref_id = Column(String, primary_key=True)
-    gene_id = Column(String)
-    
-
+from ftp_downloader import ResourceNotFoundError
 
 
 def submit_db_batch(engine, batch, retry, delay = 0):
@@ -27,10 +15,11 @@ def submit_db_batch(engine, batch, retry, delay = 0):
         sleep(delay)
         try:
             with engine.begin() as con:
-                con.execute(GPLRef.__table__.insert(), batch)
+                #use replace into to avoid failures if redoing entries (will overwrite if duplicate primary key)
+                query = text("REPLACE INTO gene_gpl_ref_new (gpl, ref_id, gene_id) VALUES (:gpl, :ref_id, :gene_id)")
+                con.execute(query, batch)
 
-        #note duplicated primary key is unacceptable in this case, should never happen (means that gpl table has duplicate ref ids)
-        #just group in with default exception handling
+        #note duplicated primary key should overwrite entry
 
         except exc.OperationalError as e:
             #check if deadlock error (code 1213)
@@ -50,7 +39,7 @@ def submit_db_batch(engine, batch, retry, delay = 0):
         #catch anything else and return error
         except Exception as e:
             error = e
-        return error
+    return error
         
 def handle_batch(engine, batch, retry, failure_handler, error_handler):
     error = submit_db_batch(engine, batch, retry)
@@ -92,19 +81,17 @@ def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size
                 
         #continue to next row
         return True
+
+    #let errors be handled by callee (log error and don't mark gpl as processed)
+    #note that some of the unprocessed gpls may just not exist, can check those after
     try:
         ftp_handler.process_gpl_data(gpl, handle_row, ftp_retry)
-        #submit anything leftover in the last batch
-        handle_batch(engine, batch, db_retry, failure_handler, error_handler)
-    except RuntimeError as e:
-        error_handler(e)
-        #log entire gpl as failure by just putting in single entry with empty ref id and gene_id
-        #assume that couldn't get connection and whole gpl failed, but should check since hard to garentee
-        failure_handler([{
-            "gpl": gpl,
-            "ref_id": "",
-            "gene_id": ""
-        }])
+    #if a resource not found error was raised then the resource doesn't exist on the ftp server, just skip this one
+    except ResourceNotFoundError:
+        pass
+    #submit anything leftover in the last batch
+    handle_batch(engine, batch, db_retry, failure_handler, error_handler)
+
     
 
 

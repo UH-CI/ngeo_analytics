@@ -1,397 +1,203 @@
 import time
-import threading
+from threading import Event, Lock
 import ftplib
 from concurrent.futures import ThreadPoolExecutor
-from os import cpu_count
-import inspect
+from queue import Queue
+from time import sleep
+from threading import Thread
 
 
-
-#global id to use for easy referencing ftp connections
-ftp_con_id = 0
-id_lock = threading.Lock()
-
-
-class FTPConnection():
-    
-    def __init__(self, uri):
-        global ftp_con_id
-        global id_lock
-        with id_lock:
-            self.id = ftp_con_id
-            ftp_con_id += 1
-        self.disposed = False
-        self.lock = threading.Lock()
-        #don't lock so can acquire before finished initializing, but don't use until initialized
-        self.initialized = threading.Event()
-        #initialize connection in thread, should provide speedup since network bound
-        self.threaded_initialize_connection(uri)
+class FTPConnection:
+    def __init__(self, uri, threaded = True):
         self.uri = uri
-        self.heartbeat_idle = threading.Event()
-        #initially heartbeat is idle
-        self.heartbeat_idle.set()
-        #mark connection as valid
-        self.valid = True
-
-    def threaded_initialize_connection(self, uri):
-        t = threading.Thread(target = self.create_connection, args = (uri,))
-        t.start()
-
-    def create_connection(self, uri, cb = None):
-        self.ftp = ftplib.FTP(uri)
-        try:
-            self.ftp.login()
-        except ftplib.all_errors as e:
-            #could not establish connection, dispose connection and mark as invalid
-            self.dispose()
-            self.valid = False
-        self.initialized.set()
+        self.connection_lock = Lock()
+        self.disposed = False
+        self.heartbeat_f = None
+        #flag initially false
+        self.initialized = Event()
+        self.__connect(threaded)
+        
         
 
-    #replace ftp with new connection, note should be locked before calling
-    def reconnect(self, threaded = True):
-        #connection not initialized while reconnecting
-        self.initialized.clear()
-        #try to quit the connection in case still active
-        self.disconnect()
-        if threaded:
-            self.threaded_initialize_connection(self.uri)
+    def set_heartbeat_f(self, f):
+        self.heartbeat_f = f
+    
+    def heartbeat_finished(self):
+        if self.heartbeat_f is None:
+            return True
         else:
-            self.create_connection(self.uri)
+            return self.heartbeat_f.done()
 
-    def locked(self):
-        return self.lock.locked()
+    def reconnect(self, threaded = True):
+        self.initialized.clear()
+        self.__connect(threaded)
 
-    def disconnect(self):
+    def dispose(self):
+        #acquire connection lock to prevent conflicts if trying to connect
+        with self.connection_lock:
+            #no need to dispose if already disposed
+            if not self.disposed:
+                self.__dispose()
+
+    def __dispose(self):
+        self.disposed = True
+        self.__disconnect()
+
+    def is_initialized(self):
+        return self.initialized.isSet()
+
+    #returns if connection disposed (failed on init)
+    def wait_init(self):
+        #block on init
+        self.initialized.wait()
+        #return connection disposed
+        return not self.disposed
+
+    def __connect(self, threaded = True):
+        success = True
+        if threaded:
+            self.__threaded_create_connection()
+        else:
+            self.__create_connection()
+            success = not self.disposed
+        return success
+
+    def __threaded_create_connection(self):
+        t = Thread(target = self.__create_connection)
+        t.start()
+
+    def __create_connection(self):
+        with self.connection_lock:
+            #if the connection is disposed don't connect
+            if not self.disposed:
+                try:
+                    self.ftp = ftplib.FTP(self.uri)
+                    self.ftp.login()
+                except ftplib.all_errors as e:
+                    self.__dispose()
+            self.initialized.set()
+
+    def __disconnect(self):
         try:
             self.ftp.quit()
         except ftplib.all_errors:
             pass
 
-    def dispose(self):
-        self.disposed = True
-        self.disconnect()
-
-    def acquire(self, blocking = True):
-        # print(inspect.stack()[1][3])
-        # print("lock called")
-        # print(self.lock.locked())
-        # success = 
-        # print(success)
-        return self.lock.acquire(blocking)
     
-    def release(self):
-        return self.lock.release()
-
-    def __enter__(self):
-        self.acquire()
-    
-    def __exit__(self, type, value, tb):
-        self.release()
-
-    #use id as hash
-    def __hash__(self):
-        return self.id
-
-    def __eq__(self, other):
-        return self.id == other.id
-
-    def __ne__(self, other):
-        return self.id != other.id
-
 
 
 class FTPManager:
+    #note heartbeat is in a separate thread, so takes pulse_threads + 1 threads
+    def __init__(self, uri, size, heartrate = 2, pulse_threads = 1, startup_threads = 5):
+        self.cons = Queue(size)
+        self.all_cons = []
+        self.all_cons_lock = Lock()
+        self.disposed = False
+        init_t_exec = ThreadPoolExecutor(startup_threads)
+        for i in range(size):
+            #use thread pool executor and threadless initialization to limit number of threads started up on initial connection
+            init_t_exec.submit(self.__init_con, uri)
+        t = Thread(target = self.__heartbeat, args = (heartrate, pulse_threads,), daemon = True)
+        t.start()
 
-    def __init__(self, uri, max_cons = 1000, min_cons = 10, init_cons = 10, heartrate = 2, heartbeat_threads = None):
-        #accessing static variables from constructor is weird because pythons a wonderful language, so just define these here
-        #if only 5 connections left prepare some more
-        BUFFER_CONS = 5
-        #if more than 10 connections to spare start removing some
-        PRUNE_BUFFER = 10
-        MIN_HEARTRATE = 1
-        CPUS = cpu_count()
-        #default to 2 helpers and a main
-        if CPUS is None:
-            CPUS = 3
+    def __init_con(self, uri):
+        con = FTPConnection(uri, False)
+        self.cons.put(con)
+        #keep separate list tracking all connections for heartbeat
+        self.all_cons.append(con)
 
-        if init_cons < min_cons:
-            init_cons = min_cons
-        elif init_cons > max_cons:
-            init_cons = max_cons
-        if heartrate <= MIN_HEARTRATE:
-            heartrate = MIN_HEARTRATE
-
-        self.prune_buffer = PRUNE_BUFFER
-        self.buffer_cons = BUFFER_CONS
-        self.min_cons = min_cons
-        self.max_cons = max_cons
-
-        if heartbeat_threads is None:
-            self.heartbeat_threads = CPUS
-        #need at least 2 (pulse check and main event cycle)
-        elif heartbeat_threads < 2:
-            self.heartbeat_threads = 2
-        else:
-            self.heartbeat_threads = heartbeat_threads
-
-        self.heartrate = heartrate
-
-        self.uri = uri
-        self.in_use = 0
-
-        #should be sufficient to use single resource lock (multiples shouldn't be more efficient due to GIL)
-        #wonder what the overhead is for locking/unlocking something in python, might actually be less efficient
-        self.resource_lock = threading.Lock()
-        #self.connections = {FTPConnection(uri) for i in range(init_cons)}
-        self.connections = {FTPConnection(uri)}
-        def staggered_cons(num, interval):
-            for i in range(num):
-                time.sleep(interval)
-                with self.resource_lock:
-                    self.add_connection()
-        #stagger at 5 second intervals
-        startup_t = threading.Thread(target = staggered_cons, args = (init_cons - 1, 5,), daemon = True)
-        startup_t.start()
-
-        self.ended = threading.Event()
-        self.all_busy = threading.Semaphore(max_cons)
-        
-        #heartbeat thread to ensure connections stay alive
-        heartbeat = threading.Thread(target = self.__heartbeat, daemon = True)
-        #start heartbeat thread
-        heartbeat.start()
+    def __heartbeat(self, heartrate, threads):
+        with ThreadPoolExecutor(threads) as t_exec:
+            while not self.disposed:
+                sleep(heartrate)
+                with self.all_cons_lock:
+                    for con in self.all_cons:
+                        #check if the last heartbeat was finished, if it wasn't then don't submit another
+                        if con.heartbeat_finished():
+                            f = t_exec.submit(self.__check_pulse, con)
+                            con.set_heartbeat_f(f)
 
 
-    #(ftp, lock)
-    def __try_check_pulse(self, con):
-        # print("attempting pulse check")
-        #if connection in use, just pass heartbeat check
-        #also check if disposed and make sure manager wasn't ended
-        #also pass if not initialized yet
-        # acquired = con.acquire(False)
-        con.heartbeat_idle.clear()
-        if con.locked() or con.disposed or self.ended.is_set() or not con.initialized.is_set():
-            con.heartbeat_idle.set()
-            # #if the lock was acquired but one of the other conditions went through then unlock
-            # if acquired:
-            #     con.release()
-            return
-        #connection acquired (locked)
-        if not self.__check_pulse(con):
-            con.reconnect()
-        con.heartbeat_idle.set()
-            
-        # #release connection (unlock)
-        # con.release()
 
     def __check_pulse(self, con):
-        success = True
-        try:
-            # print("checking")
-            con.ftp.voidcmd("NOOP")
-            # print("badum\n\n")
-        except ftplib.all_errors:
-            # print("-----\n\n")
-            success = False
-        return success
-
-    def __heartbeat(self):
-        #-1 for main heartbeat thread, need at least one
-        threads = max(1, self.heartbeat_threads - 1)
-        pulse_exec = ThreadPoolExecutor(threads)
-        #should not submit new heartbeat check for a given connection if old one not complete
-        #so maintain list of the connections and their heartbeat futures
-        heartbeat_refs = {}
-        #maintain own copy of connection list and check if need to update to maintain integrity without having to lock resources
-        while not self.ended.is_set():
-            #check pulses every heartrate seconds
-            time.sleep(self.heartrate)
-
-            #check/clean heartbeat refs that are already stored
-            disposed = []
-            for connection in heartbeat_refs:
-                #first check if the connection has been disposed
-                if connection.disposed:
-                    #append to list and delete after to maintain dict integrity while iterating (might behave oddly otherwise)
-                    disposed.append(connection)
-                    #if the connection was marked as invalid then indicate to be removed from connection pool
-                    if not connection.valid:
-                        self.invalid_connection(connection)
-                else:
-                    future = heartbeat_refs[connection]
-                    #if not done do nothing, already queued for pulse check
-                    if future.done():
-                        new_future = pulse_exec.submit(self.__try_check_pulse, (connection))
-                        heartbeat_refs[connection] = new_future
-                        #if not valid should also be disposed
-                
-                #also check if 
-            #remove the disposed connections from ref dict
-            for connection in disposed:
-                del heartbeat_refs[connection]
-
-            new_cons = []
-            #acquire resource lock so can iterate over connections list
-            with self.resource_lock:
-                #just checking if any new connections not tracked by ref dict have been added
-                for connection in self.connections:
-                    if heartbeat_refs.get(connection) is None:
-                        #want to hold resource lock for as little time as possible, not sure what submit overhead is like, so just add to list for now and submit after releasing resource lock
-                        new_cons.append(connection)
-            #submit pulse check for new connections
-            for connection in new_cons:
-                future = pulse_exec.submit(self.__try_check_pulse, (connection))
-                heartbeat_refs[connection] = future
-
-
-
-    def end_all(self):
-        if ended.is_set:
+        #if manager disposed just return
+        if self.disposed:
             return
-        #no more operations
-        self.ended.set()
-        for con in self.connections:
-            #need to wait until not busy
-            with con:
-                con.dispose()
-        
-    def get_available(self):
-        #return none if ended
-        if self.ended.is_set():
-            return None
+        #wait for initialization and check if connection failed
+        if not con.wait_init():
+            self.__connection_failed(con)
+        #check connection
+        try:
+            con.voidcmd("NOOP")
+        #reconnect on failure
+        except ftplib.all_errors:
+            con.reconnect()
 
-        #block if maximum number of connections are busy
-        self.all_busy.acquire()
-        self.resource_lock.acquire()
-
-        available = None
-        backup = None
-        #make note of any invalid connections run into so they can be purged
-        invalid_connections = []
-        for con in self.connections:
-            if not con.valid:
-                #append to list to purge after to maintain integrity of connections list while iterating
-                invalid_connections.append(con)
-            #if not initialized or pulse check running can be used, but keep looking for one that is already available and isn't in use
-            elif (not con.initialized.is_set() or not con.heartbeat_idle.is_set()) and available is None:
-                #still need to acquire
-                if con.acquire(False):
-                    available = con
-                #connection in use, set as backup
-                else:
-                    backup = con
-            #try to acquire the connection, move on if already locked
-            elif con.acquire(False):
-                #already locked on an available (uninitilized) connection, need to unlock
-                if available is not None:
-                    available.release()
-                #connection acquired, ready for use by caller
-                available = con
-                break
-            else:
-                #set item as backup in case all in use
-                backup = con
-        #done with resource lock
-        self.resource_lock.release()
-        #purge any connections that were found to be invalid, note the invalid connection method acquires the resource lock
-        for con in invalid_connections:
-            self.invalid_connection(con)
-        #all connections were busy (shouldn't happen very often, only if pulse check taking all available, starting up, or at max cons just wait and retry)
-        if available is None:
-            #this should never happen
-            if backup is None:
-                raise RuntimeError("No connections available. Could not get an FTP connection")
-
-            #acquire backup connection (block until can acquire)
-            backup.acquire()
-            available = backup
-        #already acquired, should be good to go
-        return available
 
 
     def get_con(self):
-        con = self.get_available()
-        with self.resource_lock:
-            self.in_use += 1
-            self.check_add_connection()
-        #wait until pulse check finished if running
-        con.heartbeat_idle.wait()
-        #wait until initialized if it isn't
-        con.initialized.wait()
-        #if there was an issue in initialization the connection will be invalid, check for this and indicate invalid connection found and retry if it was
-        if not con.valid:
-            #release the connection
-            self.release_con(con)
-            #mark invalid
-            self.invalid_connection(con)
-            #get a new connection
+        if self.disposed:
+            raise Exception("Called after disposed")
+        #get connection from queue, block if none available
+        con = self.cons.get()
+        #wait for connection to initialize
+        #if the connection is disposed (failed to initialize) indicate failure and get next connection
+        if not con.wait_init():
+            self.__connection_failed(con)
             con = self.get_con()
         return con
 
 
-    def invalid_connection(self, con):
-        with self.resource_lock:
-            #discard removes element if exists, possible this may be called in heartbeat and one of the other checks
-            self.connections.discard(con)
-            #if connections are becoming invalid (can't connect) should limit maximum number of connections to the current total
-            self.max_cons = len(self.connections)
-            #if max connections is 0 then there's a problem, throw an error
-            if self.max_cons < 1:
-                raise Exception("Underflow error. Could not establish any connections to ftp server")
-            
+    def return_con(self, con):
+        if self.disposed:
+            raise Exception("Called after disposed")
+        self.cons.put(con)
+
+    #connection failed while being used, try to reconnect or get another connection
+    def reconnect(con):
+        new_con = None
+        if self.disposed:
+            raise Exception("Called after disposed")
+        #connection is already being reinitialized, just wait
+        if not con.is_initialized():
+            #check if initialization was successful
+            if con.wait_init():
+                new_con = con
+        #reconnect the connection (not threaded) and return after, if the connection failed to reconnect, try to get the next connection
+        else:
+            if con.reconnect(threaded = False):
+                new_con = con
+        if new_con is None:
+            self.__connection_failed(con)
+            new_con = self.get_con()
+        return new_con
+
+    #if the connection failed and was disposed remove from all connections list
+    def __connection_failed(self, con):
+        with self.all_cons_lock:
+            try:
+                self.all_cons.remove(con)
+            #already removed
+            except ValueError:
+                pass
+        #make sure connections list isn't empty, raise underflow error if it is
+        if len(self.all_cons) < 1:
+            raise Exception("Underflow error. Could not create any connections to FTP server")
 
 
-    def release_con(self, con, problem = False):
+    def dispose(self):
+        if self.disposed:
+            raise Exception("Called after disposed")
+        with self.all_cons_lock:
+            self.disposed = True
+            for con in self.all_cons:
+                con.dispose()
         
-        self.resource_lock.acquire()
-        self.in_use -= 1
-
-        pruned = self.check_prune_connection(con)
-
-        self.resource_lock.release()
-
-        #caller indicated a possible problem with the connection
-        #don't bother fixing potentially broken connections if pruned
-        if not pruned and problem:
-            #check if problem and reconnect if there is
-            if self.__check_pulse(con):
-                con.reconnect()
-        con.release()
-
-        self.all_busy.release()
 
 
-    #resource lock should be acquired when calling
-    def check_add_connection(self):
-        #check if idle connections is less than the number of buffer connections and total connections less than max
-        if len(self.connections) - self.in_use < self.buffer_cons and len(self.connections) < self.max_cons:
-            self.add_connection()
-
-    def add_connection(self):
-        con = FTPConnection(self.uri)
-        self.connections.add(con)
 
 
-    #resource lock should be acquired when calling
-    #no need to manage a ton of connections if most of them are idle
-    def check_prune_connection(self, con):
-        pruned = False
-        #don't need to do this
-        if self.ended.is_set():
-            return
-
-        #check if idle connections exceeds prune buffer and make sure not to prune past minimum number of connections
-        if len(self.connections) - self.in_use > self.prune_buffer and len(self.connections) > self.min_cons:
-            self.prune_connection(con)
-            pruned = True
-
-        return pruned
-
-
-    def prune_connection(self, con):
-        con.dispose()
-        self.connections.remove(con)
+        
 
 
 

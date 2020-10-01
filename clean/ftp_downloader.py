@@ -2,6 +2,8 @@ import ftplib
 import threading
 import sys
 
+class ResourceNotFoundError(Exception):
+    pass
 
 #threadsafe
 #consumes data as it goes to save memory
@@ -203,11 +205,14 @@ def get_gpl_data_stream(ftp, gpl, data_processor):
     #verify resource exists and thow exception if it doesn't
     try:
         files = get_ftp_files(ftp, resource_dir)
-    #if permanent error response should be resource not found
-    except ftplib.error_perm:
-        raise Exception("Resource dir not found %s" % resource_dir)
+    #if temp error response should be resource not found
+    except ftplib.error_temp as e:
+        #raise a separate error if the issue was that the resource was not found (temp, 450), otherwise just reflect error
+        if e[:3] == "450":
+            raise ResourceNotFoundError("Resource dir not found %s" % resource_dir)
+        else raise e
     if resource not in files:
-        raise Exception("Resource not found %s" % resource)
+        raise ResourceNotFoundError("Resource not found %s" % resource)
 
     get_data_stream_from_resource(ftp, resource, data_processor)
 
@@ -232,15 +237,17 @@ def get_gse_data_stream(ftp, gse, gpl, data_processor):
     files = None
     try:
         files = get_ftp_files(ftp, resource_dir)
-    #if permanent error response should be resource not found
-    except ftplib.error_perm:
-        raise Exception("Resource dir not found %s" % resource_dir)
+    #if temp error response should be resource not found
+    except ftplib.error_temp as e:
+        #raise a separate error if the issue was that the resource was not found (temp, 450), otherwise just reflect error
+        if e[:3] == "450":
+            raise ResourceNotFoundError("Resource dir not found %s" % resource_dir)
     if resource_single in files:
         resource = resource_single
     elif resource_multiple in files:
         resource = resource_multiple
     else:
-        raise Exception("Resource not found in dir %s" % resource_dir)
+        raise ResourceNotFoundError("Resource not found in dir %s" % resource_dir)
     get_data_stream_from_resource(ftp, resource, data_processor)
 
 #series are <gse>_series_matrix.txt.gz if only one platform associated
@@ -249,26 +256,31 @@ def get_gse_data_stream(ftp, gse, gpl, data_processor):
 
 
 
-
-
+def retr_data_t(ftp, resource, stream, blocksize, term_flag, shutdown_flag):
+    ftp.voidcmd('TYPE I')
+    with ftp.transfercmd("RETR %s" % resource) as sock:
+        data = sock.recv(blocksize)
+        while data:
+            #check if should terminate
+            if(term_flag.is_set()):
+                break
+            stream.write(data)
+            #get next block of data
+            data = sock.recv(blocksize)
+    #response will be a 4xx error response because transfer closed before complete, use getmultiline to get response with no error handling
+    resp = ftp.getmultiline()
+    #set ftp object's lastresp property to ensure object consistency
+    ftp.lastresp = resp[:3]
+    stream.end_of_data()
+    shutdown_flag.set()
 
 def retr_data(ftp, resource, stream, blocksize, term_flag):
-    def data_cb(data):
-        #check if should terminate
-        if(term_flag.is_set()):
-            #try to abort file transfer
-            try:
-                ftp.abort()
-            except ftplib.all_errors:
-                pass
-            #end data stream
-            stream.end_of_data()
-            #terminate thread
-            sys.exit()
-        stream.write(data)
-
-    ftp.retrbinary("RETR %s" % resource, data_cb, blocksize = blocksize)
-    stream.end_of_data()
+    #event signaling complete
+    shutdown = threading.Event()
+    #daemon thread stops thread if parent exit
+    t = threading.Thread(target = retr_data_t, args = (ftp, resource, stream, blocksize, term_flag, shutdown,), daemon = True)
+    t.start()
+    return shutdown
 
 
 def get_data_stream_from_resource(ftp, resource, data_processor):
@@ -278,12 +290,10 @@ def get_data_stream_from_resource(ftp, resource, data_processor):
 
     term_flag = threading.Event()
     
-    #daemon thread stops thread if parent exit
-    t = threading.Thread(target = retr_data, args = (ftp, resource, stream, 4096, term_flag), daemon = True)
-    t.start()
-
+    shutdown_flag = retr_data(ftp, resource, stream, 4096, term_flag)
 
     data_processor(stream)
     term_flag.set()
-
+    #wait on connection to shut down and resources to be released before returning to prevent conflicts
+    shutdown_flag.wait()
         
