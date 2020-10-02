@@ -2,13 +2,15 @@
 
 import sqlalchemy
 import json
+from time import sleep
+from sqlalchemy import exc
+import random
 
 default_config_file = "config.json"
-
 engine = None
 tunnel = None
 
-def get_db_engine(config = None):
+def create_db_engine(config = None):
 
     global engine
     global tunnel
@@ -64,3 +66,43 @@ def cleanup_db_engine():
     if tunnel is not None:
         tunnel.stop()
         tunnel = None
+
+
+def engine_exec_r(query, params, retry, delay = 0):
+    global engine
+    if engine is None:
+        raise Exception("create_db_engine must be called before executing on engine")
+
+    if retry < 0:
+        raise Exception("Retry limit exceeded")
+    #HANDLE THIS IN CALLER
+    # #do nothing if empty list (note batch size limiting handled in caller in this case)
+    # elif len(batch) > 0:
+    sleep(delay)
+    res = None
+    #engine.begin() block has error handling logic, so try catch should be outside of this block
+    #note caller should handle errors and cleanup engine as necessary
+    try:
+        with engine.begin() as con:
+            res = con.execute(query, params) if params is not None else con.execute(query)
+    except exc.OperationalError as e:
+        #check if deadlock error (code 1213)
+        if e.orig.args[0] == 1213:
+            backoff = 0
+            #if first failure backoff of 0.25-0.5 seconds
+            if delay == 0:
+                backoff = 0.25 + random.uniform(0, 0.25)
+            #otherwise 2-3x current backoff
+            else:
+                backoff = delay * 2 + random.uniform(0, delay)
+            #retry with one less retry remaining and current backoff
+            res = engine_exec_r(query, params, retry - 1, backoff)
+        #something else went wrong, log exception and add to failures
+        else:
+            raise e
+    #return query result
+    return res
+
+
+def engine_exec(query, params, retry):
+    return engine_exec_r(query, params, retry)

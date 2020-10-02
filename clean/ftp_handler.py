@@ -15,7 +15,7 @@ class FTPHandler:
 
 
     def parse_data_table_gz(self, file, table_start, table_end, row_processor):
-        
+        with gzip.open(file, "rt", encoding = "utf8", errors = "ignore") as f:
             #read past header data to table
             for line in f:
                 line = line.strip()
@@ -71,15 +71,15 @@ class FTPHandler:
         table_end = "!platform_table_end"
         try:
             ftp_downloader.get_gpl_data_stream(ftp, gpl, self.data_processor(table_start, table_end, row_handler))
-            self.manager.release_con(ftp_con)
+            self.manager.return_con(ftp_con)
         #problem with connection
         except ftplib.all_errors as e:
             #retry
             self.__process_gpl_data_r(gpl, row_handler, retry - 1, ftp_con)
         #probably an issue with resource info or gpl/resource does not exist
-        #shouldn't actually be a problem with the connection, assumes error was not in release_con call
+        #shouldn't actually be a problem with the connection, assumes error was not in return_con call
         except Exception as e:
-            self.manager.release_con(ftp_con)
+            self.manager.return_con(ftp_con)
             raise e
 
     

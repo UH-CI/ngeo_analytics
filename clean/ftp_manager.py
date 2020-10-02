@@ -30,7 +30,9 @@ class FTPConnection:
 
     def reconnect(self, threaded = True):
         self.initialized.clear()
-        self.__connect(threaded)
+        #try to disconnect current connection in case still connected
+        self.__disconnect()
+        return self.__connect(threaded)
 
     def dispose(self):
         #acquire connection lock to prevent conflicts if trying to connect
@@ -84,15 +86,17 @@ class FTPConnection:
             pass
 
     
-
+class GetConnectionTimeoutError(Exception):
+    pass
 
 class FTPManager:
     #note heartbeat is in a separate thread, so takes pulse_threads + 1 threads
-    def __init__(self, uri, size, heartrate = 2, pulse_threads = 1, startup_threads = 5):
+    def __init__(self, uri, size, heartrate = 2, pulse_threads = 1, startup_threads = 5, get_connection_timeout = 300):
         self.cons = Queue(size)
         self.all_cons = []
         self.all_cons_lock = Lock()
         self.disposed = False
+        self.timeout = get_connection_timeout
         init_t_exec = ThreadPoolExecutor(startup_threads)
         for i in range(size):
             #use thread pool executor and threadless initialization to limit number of threads started up on initial connection
@@ -103,8 +107,9 @@ class FTPManager:
     def __init_con(self, uri):
         con = FTPConnection(uri, False)
         self.cons.put(con)
-        #keep separate list tracking all connections for heartbeat
-        self.all_cons.append(con)
+        with self.all_cons_lock:
+            #keep separate list tracking all connections for heartbeat
+            self.all_cons.append(con)
 
     def __heartbeat(self, heartrate, threads):
         with ThreadPoolExecutor(threads) as t_exec:
@@ -125,6 +130,7 @@ class FTPManager:
             return
         #wait for initialization and check if connection failed
         if not con.wait_init():
+            #note this acquires the all cons lock, should be fine since this is run in a thread (should be unlocked in caller)
             self.__connection_failed(con)
         #check connection
         try:
@@ -137,9 +143,12 @@ class FTPManager:
 
     def get_con(self):
         if self.disposed:
-            raise Exception("Called after disposed")
+            raise Exception("get_con called after disposed")
         #get connection from queue, block if none available
-        con = self.cons.get()
+        try:
+            con = self.cons.get(timeout = self.timeout)
+        except queue.Empty:
+            raise GetConnectionTimeoutError("Timed out while attempting to get connection")
         #wait for connection to initialize
         #if the connection is disposed (failed to initialize) indicate failure and get next connection
         if not con.wait_init():
@@ -150,14 +159,14 @@ class FTPManager:
 
     def return_con(self, con):
         if self.disposed:
-            raise Exception("Called after disposed")
+            raise Exception("return_con called after disposed")
         self.cons.put(con)
 
     #connection failed while being used, try to reconnect or get another connection
-    def reconnect(con):
+    def reconnect(self, con):
         new_con = None
         if self.disposed:
-            raise Exception("Called after disposed")
+            raise Exception("reconnect called after disposed")
         #connection is already being reinitialized, just wait
         if not con.is_initialized():
             #check if initialization was successful
@@ -182,16 +191,18 @@ class FTPManager:
                 pass
         #make sure connections list isn't empty, raise underflow error if it is
         if len(self.all_cons) < 1:
+            #dispose, since can't really do anything
+            self.dispose()
             raise Exception("Underflow error. Could not create any connections to FTP server")
 
 
     def dispose(self):
-        if self.disposed:
-            raise Exception("Called after disposed")
-        with self.all_cons_lock:
-            self.disposed = True
-            for con in self.all_cons:
-                con.dispose()
+        #do nothing if already disposed
+        if not self.disposed:
+            with self.all_cons_lock:
+                self.disposed = True
+                for con in self.all_cons:
+                    con.dispose()
         
 
 

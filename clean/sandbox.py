@@ -11,7 +11,7 @@ def mark_gpl_processed(engine, gpl):
     with engine.begin() as con:
         con.execute(query, gpl = gpl)
 
-engine = db_connect.get_db_engine()
+engine = db_connect.create_db_engine()
 try:
    mark_gpl_processed(engine, "GPL9999")
    db_connect.cleanup_db_engine()

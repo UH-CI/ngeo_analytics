@@ -15,7 +15,7 @@ config = None
 with open(config_file) as f:
     config = json.load(f)
 
-def create_table(engine):
+def create_table():
     query = text("""CREATE TABLE IF NOT EXISTS gene_gpl_ref_new (
         gpl TEXT NOT NULL,
         ref_id TEXT NOT NULL,
@@ -23,8 +23,7 @@ def create_table(engine):
         PRIMARY KEY (gpl(255), ref_id(255))
     );""")
 
-    with engine.begin() as con:
-        con.execute(query)
+    db_connect.engine_exec(query, None, 0)
     
 
 
@@ -46,22 +45,22 @@ def get_error_handler(lock):
                 f.write("%s\n" % str(e))
     return _error_handler
 
-def get_failure_handler(lock):
-    fname = config["out_files"]["failure_log"]
-    def _failure_handler(entries):
-        with lock:
-            with open(fname, "a") as f:
-                for entry in entries:
-                    f.write("%s,%s,%s\n" % (entry["gpl"], entry["ref_id"], entry["gene_id"]))
-    return _failure_handler
+# def get_failure_handler(lock):
+#     fname = config["out_files"]["failure_log"]
+#     def _failure_handler(entries):
+#         with lock:
+#             with open(fname, "a") as f:
+#                 for entry in entries:
+#                     f.write("%s,%s,%s\n" % (entry["gpl"], entry["ref_id"], entry["gene_id"]))
+#     return _failure_handler
 
 def init_logs():
     fname = config["out_files"]["error_log"]
     with open(fname, "w") as f:
         f.write("")
-    fname = config["out_files"]["failure_log"]
-    with open(fname, "w") as f:
-        f.write("gpl,ref_id,gene_id\n")
+    # fname = config["out_files"]["failure_log"]
+    # with open(fname, "w") as f:
+    #     f.write("gpl,ref_id,gene_id\n")
 
 def get_processes():
     processes = config["p_limit"]
@@ -75,46 +74,56 @@ def get_threads():
         threads = cpu_count()
     return threads
 
-def mark_gpl_processed(engine, gpl):
+def mark_gpl_processed(gpl, retry):
     query = text("""
         UPDATE gpl_processed
         SET processed = true
         WHERE gpl = :gpl;
     """)
-    with engine.begin() as con:
-        con.execute(query, gpl = gpl)
+    params = {
+        "gpl": gpl
+    }
+    db_connect.engine_exec(query, params, retry)
+   
 
 
-def process_batch(batch, failure_lock, error_lock):
+def process_batch(batch, error_lock):
     threads = get_threads()
     ftp_opts = config["ftp_opts"]
     ftp_base = config["ftp_base"]
+    ftp_pool_size = config["ftp_pool_size"]
     g2a_db = config["gene2accession_file"]
     #want one handler (one ftp manager) for all threads, should be threadsafe
-    ftp_handler = FTPHandler(ftp_base, ftp_opts)
+    ftp_handler = FTPHandler(ftp_base, ftp_pool_size, ftp_opts)
     #also one engine for all threads
-    engine = db_connect.get_db_engine(config["extern_db_config"])
+    #just use engine exec for everything instead of passing around engine
+    db_connect.create_db_engine(config["extern_db_config"])
     insert_batch_size = config["insert_batch_size"]
     db_retry = config["db_retry"]
     ftp_retry = config["ftp_retry"]
-    failure_handler = get_failure_handler(failure_lock)
+    #failures now tracked only by whole gpl by gpl_processed table for easy retry
+    # failure_handler = get_failure_handler(failure_lock)
     error_handler = get_error_handler(error_lock)
     err = None
     try:
         with ThreadPoolExecutor(threads) as t_exec:
             for gpl in batch:
-                #gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size, failure_handler, error_handler
-                f = t_exec.submit(platform_processor.handle_gpl, gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, insert_batch_size, failure_handler, error_handler)
+                #gpl, g2a_db, ftp_handler, db_retry, ftp_retry, batch_size
+                f = t_exec.submit(platform_processor.handle_gpl, gpl, g2a_db, ftp_handler, db_retry, ftp_retry, insert_batch_size)
                 def cb(gpl):
                     def _cb(f):
                         e = f.exception()
-                        #shouldn't throw exceptions, this is bad, print to console and log (note unknown what was inserted if this triggered so can't log failures)
                         if e is not None:
                             e = "Error in gpl %s handler: %s" % (gpl, str(e))
                             error_handler(e)
                         #only mark as processed if an error wasn't thrown
                         else:
-                            mark_gpl_processed(engine, gpl)
+                            try:
+                                mark_gpl_processed(gpl, db_retry)
+                            #if an exception occured while trying to mark as processed then can always just reprocess, log error and ignore
+                            except Exception as e:
+                                e = "Error while updating gpl %s processed entry: %s" % (gpl, str(e))
+                                error_handler(e)
                     return _cb
                 f.add_done_callback(cb(gpl))
     except Exception as e:
@@ -126,11 +135,11 @@ def process_batch(batch, failure_lock, error_lock):
         raise err
 
 batches_complete = 0
-def handle_batch(batch, p_exec, failure_lock, error_lock):
+def handle_batch(batch, p_exec, error_lock):
     if len(batch) == 0:
         return
     error_handler = get_error_handler(error_lock)
-    f = p_exec.submit(process_batch, batch, failure_lock, error_lock)
+    f = p_exec.submit(process_batch, batch, error_lock)
     def cb(f):
         global batches_complete
         batches_complete += 1
@@ -149,38 +158,38 @@ def main():
     #need output files to be coordinated between processes, use manager locks
     #note this creates an extra process
     manager = Manager()
-    failure_lock = manager.Lock()
     error_lock = manager.Lock()
 
     res = None
-    engine = db_connect.get_db_engine(config["extern_db_config"])
+    db_connect.create_db_engine(config["extern_db_config"])
     try:
-        create_table(engine)
+        create_table()
         #get all unprocessed gpls
         query = """
             SELECT gpl
             FROM gpl_processed
             WHERE processed is false;
         """
-        with engine.begin() as con:
-            res = con.execute(query)
-    except Exception as e:
-        print(e, file = stderr)
-    finally:
+        res = db_connect.engine_exec(query, None, 0)
         db_connect.cleanup_db_engine()
-
-    
+    except Exception as e:
+        db_connect.cleanup_db_engine()
+        raise e
+        
+   
     with ProcessPoolExecutor(processes) as p_exec:
-        gpl = res.fetchone()[0]
+        data = res.fetchone()
         batch = []
-        while gpl is not None:
+        while data is not None:
+            gpl = data[0]
             batch.append(gpl)
             if len(batch) % batch_size == 0:
-                handle_batch(batch, p_exec, failure_lock, error_lock)
+                handle_batch(batch, p_exec, error_lock)
                 batch = []
-            gpl = res.fetchone()[0]
+            data = res.fetchone()
         #handle remaining items
-        handle_batch(batch, p_exec, failure_lock, error_lock)
+        handle_batch(batch, p_exec, error_lock)
+    print("Complete!")
 
 
 

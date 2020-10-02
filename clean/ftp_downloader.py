@@ -84,7 +84,6 @@ class CircularRWBuffer():
         
         #need to block until proper number of bytes ready!!! (issue is probably that read expects n bytes and providing less because it's ready)
         #only provide < asked for bytes if eof (data stream complete)
-
         #if not blocking then just read what's there
         if read_size is None or (read_size > self.size and (self.complete or not block)):
             read_size = self.size
@@ -208,9 +207,10 @@ def get_gpl_data_stream(ftp, gpl, data_processor):
     #if temp error response should be resource not found
     except ftplib.error_temp as e:
         #raise a separate error if the issue was that the resource was not found (temp, 450), otherwise just reflect error
-        if e[:3] == "450":
+        if e.args[0][:3] == "450":
             raise ResourceNotFoundError("Resource dir not found %s" % resource_dir)
-        else raise e
+        else:
+            raise e
     if resource not in files:
         raise ResourceNotFoundError("Resource not found %s" % resource)
 
@@ -240,7 +240,7 @@ def get_gse_data_stream(ftp, gse, gpl, data_processor):
     #if temp error response should be resource not found
     except ftplib.error_temp as e:
         #raise a separate error if the issue was that the resource was not found (temp, 450), otherwise just reflect error
-        if e[:3] == "450":
+        if e.args[0][:3] == "450":
             raise ResourceNotFoundError("Resource dir not found %s" % resource_dir)
     if resource_single in files:
         resource = resource_single
@@ -254,46 +254,55 @@ def get_gse_data_stream(ftp, gse, gpl, data_processor):
 #otherwise <gse>-<gpl>_series_matrix.txt.gz
 
 
-
-
-def retr_data_t(ftp, resource, stream, blocksize, term_flag, shutdown_flag):
-    ftp.voidcmd('TYPE I')
-    with ftp.transfercmd("RETR %s" % resource) as sock:
-        data = sock.recv(blocksize)
-        while data:
-            #check if should terminate
-            if(term_flag.is_set()):
-                break
-            stream.write(data)
-            #get next block of data
+def retr_data(ftp, resource, stream, blocksize, term_flag, t_data):
+    try:
+        ftp.voidcmd('TYPE I')
+        with ftp.transfercmd("RETR %s" % resource) as sock:
             data = sock.recv(blocksize)
-    #response will be a 4xx error response because transfer closed before complete, use getmultiline to get response with no error handling
-    resp = ftp.getmultiline()
-    #set ftp object's lastresp property to ensure object consistency
-    ftp.lastresp = resp[:3]
-    stream.end_of_data()
-    shutdown_flag.set()
+            while data:
+                #check if should terminate
+                if(term_flag.is_set()):
+                    break
+                stream.write(data)
+                #get next block of data
+                data = sock.recv(blocksize)
+        #response will be a 4xx error response because transfer closed before complete, use getmultiline to get response with no error handling
+        resp = ftp.getmultiline()
+        #set ftp object's lastresp property to ensure object consistency
+        ftp.lastresp = resp[:3]
+        stream.end_of_data()
+    except Exception as e:
+        #set exception in thread data object to the thrown exception so can be handled by caller
+        t_data["exception"] = e
+        #mark stream end of data so data processor know's nothing else is coming
+        stream.end_of_data()
 
-def retr_data(ftp, resource, stream, blocksize, term_flag):
-    #event signaling complete
-    shutdown = threading.Event()
-    #daemon thread stops thread if parent exit
-    t = threading.Thread(target = retr_data_t, args = (ftp, resource, stream, blocksize, term_flag, shutdown,), daemon = True)
-    t.start()
-    return shutdown
 
 
 def get_data_stream_from_resource(ftp, resource, data_processor):
-
     #256KB starting buffer
     stream = CircularRWBuffer(262144)
 
     term_flag = threading.Event()
-    
-    shutdown_flag = retr_data(ftp, resource, stream, 4096, term_flag)
-
-    data_processor(stream)
+    t_data = {
+        "exception": None
+    }
+    t = threading.Thread(target = retr_data, args = (ftp, resource, stream, 2048, term_flag, t_data,))
+    t.start()
+    err = None
+    try:
+        data_processor(stream)
+    #store any exceptions and raise after cleanup
+    except Exception as e:
+        err = e
+    #data processor finished, terminate read
     term_flag.set()
-    #wait on connection to shut down and resources to be released before returning to prevent conflicts
-    shutdown_flag.wait()
-        
+    #wait on transfer sock to shut down and resources to be released before returning to prevent conflicts
+    t.join()
+    #if there was an error in the ftp read thread then set the error to this
+    #prioratize throwing errors from ftp read thread (will overwrite error from data processor)
+    if t_data["exception"] is not None:
+        err = t_data["exception"]
+    #raise any exceptions that were encountered in data handler
+    if err is not None:
+        raise err

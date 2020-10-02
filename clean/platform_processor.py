@@ -1,55 +1,19 @@
-from sqlalchemy import exc, text
+from sqlalchemy import text
 from time import sleep
-import random
 import re
 import sqlite3
 from ftp_downloader import ResourceNotFoundError
+from db_connect import engine_exec
 
+def submit_db_batch(batch, retry):
+    if len(batch) > 0:
+        query = text("REPLACE INTO gene_gpl_ref_new (gpl, ref_id, gene_id) VALUES (:gpl, :ref_id, :gene_id)")
+        engine_exec(query, batch, retry)
 
-def submit_db_batch(engine, batch, retry, delay = 0):
-    error = None
-    if retry < 0:
-        error = Exception("Retry limit exceeded")
-    #do nothing if empty list (note batch size limiting handled in caller in this case)
-    elif len(batch) > 0:
-        sleep(delay)
-        try:
-            with engine.begin() as con:
-                #use replace into to avoid failures if redoing entries (will overwrite if duplicate primary key)
-                query = text("REPLACE INTO gene_gpl_ref_new (gpl, ref_id, gene_id) VALUES (:gpl, :ref_id, :gene_id)")
-                con.execute(query, batch)
-
-        #note duplicated primary key should overwrite entry
-
-        except exc.OperationalError as e:
-            #check if deadlock error (code 1213)
-            if e.orig.args[0] == 1213:
-                backoff = 0
-                #if first failure backoff of 0.25-0.5 seconds
-                if delay == 0:
-                    backoff = 0.25 + random.uniform(0, 0.25)
-                #otherwise 2-3x current backoff
-                else:
-                    backoff = delay * 2 + random.uniform(0, delay)
-                #retry with one less retry remaining and current backoff
-                error = submit_db_batch(engine, batch, retry - 1, backoff)
-            #something else went wrong, log exception and add to failures
-            else:
-                error = e
-        #catch anything else and return error
-        except Exception as e:
-            error = e
-    return error
-        
-def handle_batch(engine, batch, retry, failure_handler, error_handler):
-    error = submit_db_batch(engine, batch, retry)
-    if error is not None:
-        error_handler(error)
-        failure_handler(batch)
                 
 
 #log gpl failures, errors, and no translations
-def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size, failure_handler, error_handler):
+def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, batch_size):
     batch = [] 
     
     #(id_col, [translation_cols])
@@ -76,7 +40,8 @@ def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size
             }
             batch.append(fields)
             if len(batch) % batch_size == 0:
-                handle_batch(engine, batch, db_retry, failure_handler, error_handler)
+                #just let errors be handled in thread executor callback, if a single batch fails just redo the whole platform for simplicity sake
+                submit_db_batch(batch, db_retry)
                 batch = []
                 
         #continue to next row
@@ -90,7 +55,7 @@ def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, engine, batch_size
     except ResourceNotFoundError:
         pass
     #submit anything leftover in the last batch
-    handle_batch(engine, batch, db_retry, failure_handler, error_handler)
+    submit_db_batch(batch, db_retry)
 
     
 
