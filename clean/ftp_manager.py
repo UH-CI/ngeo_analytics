@@ -101,7 +101,7 @@ class FTPManager:
         for i in range(size):
             #use thread pool executor and threadless initialization to limit number of threads started up on initial connection
             init_t_exec.submit(self.__init_con, uri)
-        t = Thread(target = self.__heartbeat, args = (heartrate, pulse_threads,), daemon = True)
+        t = Thread(target = self.__heartbeat, args = (heartrate, pulse_threads,))
         t.start()
 
     def __init_con(self, uri):
@@ -204,6 +204,13 @@ class FTPManager:
                 for con in self.all_cons:
                     con.dispose()
         
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.dispose()
+
+    
 
 
 

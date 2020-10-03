@@ -61,6 +61,11 @@ class CircularRWBuffer():
         self.data_block.set()
         self.access_lock.release()
 
+    def get_size(self):
+        size = 0
+        with self.access_lock:
+            size = self.size
+        return size
 
     def read(self, read_size = None, block = True, timeout = None):
 
@@ -254,6 +259,50 @@ def get_gse_data_stream(ftp, gse, gpl, data_processor):
 #otherwise <gse>-<gpl>_series_matrix.txt.gz
 
 
+class FTPStreamException(Exception):
+    pass
+
+class FTPDirectStreamReader():
+    def __init__(self, ftp, resource, bufsize, chunksize = 2048):
+        self.ftp = ftp
+        self.chunksize = chunksize
+        #use intermediary buffer so can read consistent chunks (use the circularRWBuffer since it should be pretty efficient)
+        self.buffer = CircularRWBuffer(bufsize)
+        ftp.voidcmd("TYPE I")
+        self.sock = ftp.transfercmd("RETR %s" % resource)
+
+    def read(self, size):
+        #read chunks to buffer until have enough data
+        while self.buffer.get_size() < size: 
+            data = self.sock.recv(self.chunksize)
+            #reached end of stream
+            if not data:
+                self.buffer.end_of_data()
+                break
+            self.buffer.write(data)
+        data = self.buffer.read(size)
+        return data
+
+    def dispose(self):
+        self.sock.close()
+        #response will be a 4xx error response because transfer closed before complete, use getmultiline to get response with no error handling
+        resp = self.ftp.getmultiline()
+        #set ftp object's lastresp property to ensure object consistency
+        self.ftp.lastresp = resp[:3]
+        
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.dispose()
+        if exc_type is not None:
+            raise FTPStreamException("FTP stream reader failed with exception of type %s: %s" % (exc_type.__name__, exc_val))
+
+        
+
+
+
 def retr_data(ftp, resource, stream, blocksize, term_flag, t_data):
     try:
         ftp.voidcmd('TYPE I')
@@ -280,29 +329,33 @@ def retr_data(ftp, resource, stream, blocksize, term_flag, t_data):
 
 
 def get_data_stream_from_resource(ftp, resource, data_processor):
-    #256KB starting buffer
-    stream = CircularRWBuffer(262144)
+    # #256KB starting buffer
+    # stream = CircularRWBuffer(262144)
 
-    term_flag = threading.Event()
-    t_data = {
-        "exception": None
-    }
-    t = threading.Thread(target = retr_data, args = (ftp, resource, stream, 2048, term_flag, t_data,))
-    t.start()
-    err = None
-    try:
+    # term_flag = threading.Event()
+    # t_data = {
+    #     "exception": None
+    # }
+    # t = threading.Thread(target = retr_data, args = (ftp, resource, stream, 2048, term_flag, t_data,))
+    # t.start()
+    # err = None
+    # try:
+    #     data_processor(stream)
+    # #store any exceptions and raise after cleanup
+    # except Exception as e:
+    #     err = e
+    # #data processor finished, terminate read
+    # term_flag.set()
+    # #wait on transfer sock to shut down and resources to be released before returning to prevent conflicts
+    # t.join()
+    # #if there was an error in the ftp read thread then set the error to this
+    # #prioratize throwing errors from ftp read thread (will overwrite error from data processor)
+    # if t_data["exception"] is not None:
+    #     err = t_data["exception"]
+    # #raise any exceptions that were encountered in data handler
+    # if err is not None:
+    #     raise err
+
+    with FTPDirectStreamReader(ftp, resource, 8192) as stream:
         data_processor(stream)
-    #store any exceptions and raise after cleanup
-    except Exception as e:
-        err = e
-    #data processor finished, terminate read
-    term_flag.set()
-    #wait on transfer sock to shut down and resources to be released before returning to prevent conflicts
-    t.join()
-    #if there was an error in the ftp read thread then set the error to this
-    #prioratize throwing errors from ftp read thread (will overwrite error from data processor)
-    if t_data["exception"] is not None:
-        err = t_data["exception"]
-    #raise any exceptions that were encountered in data handler
-    if err is not None:
-        raise err
+
