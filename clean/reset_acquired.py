@@ -1,12 +1,8 @@
-import db_connect
+from db_connect import DBConnector
 from sqlalchemy import text
 
-db_connect.create_db_engine()
-try:
-    query = text("UPDATE gpl_processed SET acquired = -1")
-    db_connect.engine_exec(query, None, 5)
-    db_connect.cleanup_db_engine()
-except Exception as e:
-    db_connect.cleanup_db_engine()
-    raise e
+with DBConnector() as connector:
+    query = text("UPDATE gpl_processed SET acquired = -1;")
+    connector.engine_exec(query, None, 5)
+
 

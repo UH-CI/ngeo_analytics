@@ -3,17 +3,16 @@ from time import sleep
 import re
 import sqlite3
 from ftp_downloader import ResourceNotFoundError
-from db_connect import engine_exec
 
-def submit_db_batch(batch, retry):
+def submit_db_batch(connector, batch, retry):
     if len(batch) > 0:
         query = text("REPLACE INTO gene_gpl_ref_new (gpl, ref_id, gene_id) VALUES (:gpl, :ref_id, :gene_id)")
-        engine_exec(query, batch, retry)
+        connector.engine_exec(query, batch, retry)
 
                 
 
 #log gpl failures, errors, and no translations
-def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, batch_size):
+def handle_gpl(connector, gpl, g2a_db, ftp_handler, db_retry, ftp_retry, batch_size):
     batch = [] 
     
     #(id_col, [translation_cols])
@@ -41,7 +40,7 @@ def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, batch_size):
             batch.append(fields)
             if len(batch) % batch_size == 0:
                 #just let errors be handled in thread executor callback, if a single batch fails just redo the whole platform for simplicity sake
-                submit_db_batch(batch, db_retry)
+                submit_db_batch(connector, batch, db_retry)
                 batch = []
                 
         #continue to next row
@@ -55,7 +54,7 @@ def handle_gpl(gpl, g2a_db, ftp_handler, db_retry, ftp_retry, batch_size):
     except ResourceNotFoundError:
         pass
     #submit anything leftover in the last batch
-    submit_db_batch(batch, db_retry)
+    submit_db_batch(connector, batch, db_retry)
 
     
 

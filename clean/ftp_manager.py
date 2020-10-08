@@ -137,6 +137,7 @@ class FTPManager:
             con.voidcmd("NOOP")
         #reconnect on failure
         except ftplib.all_errors:
+            print("disconnect")
             con.reconnect()
 
 
@@ -164,6 +165,7 @@ class FTPManager:
 
     #connection failed while being used, try to reconnect or get another connection
     def reconnect(self, con):
+        print("reconnect")
         new_con = None
         if self.disposed:
             raise Exception("reconnect called after disposed")
@@ -174,11 +176,13 @@ class FTPManager:
                 new_con = con
         #reconnect the connection (not threaded) and return after, if the connection failed to reconnect, try to get the next connection
         else:
+            print("con reconnecting")
             if con.reconnect(threaded = False):
                 new_con = con
         if new_con is None:
             self.__connection_failed(con)
             new_con = self.get_con()
+        print("reconnected")
         return new_con
 
     #if the connection failed and was disposed remove from all connections list

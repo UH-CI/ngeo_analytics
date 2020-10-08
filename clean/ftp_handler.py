@@ -6,7 +6,8 @@ import math
 import ftplib
 from ftp_manager import FTPManager
 import ftp_downloader
-
+import sys
+import traceback
 
 
 class FTPHandler:
@@ -51,13 +52,16 @@ class FTPHandler:
         
 
     
-    def __process_gpl_data_r(self, gpl, row_handler, retry, ftp_con = None):
+    def __process_gpl_data_r(self, gpl, row_handler, retry, ftp_con = None, last_error = None):
         if retry < 0:
+            print("failure")
+            print(retry)
+            print(last_error)
             if ftp_con is not None:
                 #release connection, there may be an issue with it, but it's not my problem anymore (should be picked up by heartbeat or something)
                 self.manager.return_con(ftp_con)
             #raise retry limit exceeded error
-            raise RuntimeError("A connection error has occured. Could not get FTP data")
+            raise RuntimeError("A connection error has occured. Could not get FTP data. Last error: %s" % str(last_error))
 
         #if no connection provided get a new one
         if ftp_con is None:
@@ -73,9 +77,13 @@ class FTPHandler:
             ftp_downloader.get_gpl_data_stream(ftp, gpl, self.data_processor(table_start, table_end, row_handler))
             self.manager.return_con(ftp_con)
         #problem with connection
-        except ftplib.all_errors as e:
+        #this syntax though... ftplib.all_errors is a tuple of exceptions, have to add a second tuple containing extra exceptions to add exception (, at end of tuple forces type to tuple)
+        except ftplib.all_errors + (ftp_downloader.FTPStreamException,) as e:
             #retry
-            self.__process_gpl_data_r(gpl, row_handler, retry - 1, ftp_con)
+            info = sys.exc_info()
+            print(info[1])
+            print(traceback.print_tb(info[2]))
+            self.__process_gpl_data_r(gpl, row_handler, retry - 1, ftp_con, e)
         #probably an issue with resource info or gpl/resource does not exist
         #shouldn't actually be a problem with the connection, assumes error was not in return_con call
         except Exception as e:
@@ -85,5 +93,14 @@ class FTPHandler:
     
     def dispose(self):
         self.manager.dispose()
+
+    
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.dispose()
+        if exc_type is not None:
+            raise exc_type(exc_val)
 
 

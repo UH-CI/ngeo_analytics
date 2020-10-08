@@ -285,10 +285,14 @@ class FTPDirectStreamReader():
 
     def dispose(self):
         self.sock.close()
-        #response will be a 4xx error response because transfer closed before complete, use getmultiline to get response with no error handling
-        resp = self.ftp.getmultiline()
-        #set ftp object's lastresp property to ensure object consistency
-        self.ftp.lastresp = resp[:3]
+        #if there was an issue with the connection this may error out
+        try:
+            #response will be a 4xx error response because transfer closed before complete, use getmultiline to get response with no error handling
+            resp = self.ftp.getmultiline()
+            #set ftp object's lastresp property to ensure object consistency
+            self.ftp.lastresp = resp[:3]
+        except ftplib.all_errors:
+            pass
         
 
     def __enter__(self):
