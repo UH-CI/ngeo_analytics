@@ -8,6 +8,7 @@ import json
 from os import cpu_count
 from sqlalchemy import text
 from time import sleep
+from threading import Semaphore
 
 config_file = "config.json"
 if len(argv) < 3:
@@ -132,13 +133,16 @@ def process_batch(batch):
                     f.add_done_callback(cb(gpl))
 
 batches_complete = 0
-def handle_batch(batch, p_exec):
+def handle_batch(batch, p_exec, throttle):
     if len(batch) == 0:
         return
     # error_handler = get_error_handler()
     f = p_exec.submit(process_batch, batch)
     def cb(f):
         global batches_complete
+        nonlocal throttle
+        #finished the batch, allow to acquire more
+        throttle.release()
         batches_complete += 1
         e = f.exception()
         if e is not None:
@@ -181,19 +185,18 @@ def main():
     #note this creates an extra process
     # manager = Manager()
     # error_lock = manager.Lock()
-    pause = 60
     res = None
+    throttle = Semaphore(processes)
     with ProcessPoolExecutor(processes) as p_exec:
         with DBConnector(config["extern_db_config"]) as connector:
             create_table(connector)
             submitted = 0
+            #throttle number of batches acquired to number of processes to ensure other instances can acquire some too
+            throttle.acquire()
             batch = acquire_batch(connector, exec_id, batch_size)
             while len(batch) == batch_size:
-                handle_batch(batch, p_exec)
-                submitted += 1
-                #already saturated all of the working processes, pause for a bit to make sure other instances are able to get batches (note batches take a very long time, so can pause for a while without issue)
-                if submitted % processes == 0:
-                    sleep(pause)
+                handle_batch(batch, p_exec, throttle)
+                throttle.acquire()
                 batch = acquire_batch(connector, exec_id, batch_size)
             handle_batch(batch, p_exec)
     print("Complete!")

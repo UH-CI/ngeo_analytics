@@ -2,7 +2,7 @@ import time
 from threading import Event, Lock
 import ftplib
 from concurrent.futures import ThreadPoolExecutor
-from queue import Queue
+from queue import Queue, Empty
 from time import sleep
 from threading import Thread
 
@@ -11,12 +11,12 @@ class FTPConnection:
     def __init__(self, uri, threaded = True):
         self.uri = uri
         self.connection_lock = Lock()
+        self.op_lock = Lock()
         self.disposed = False
         self.heartbeat_f = None
         #flag initially false
         self.initialized = Event()
         self.__connect(threaded)
-        
         
 
     def set_heartbeat_f(self, f):
@@ -73,7 +73,7 @@ class FTPConnection:
             #if the connection is disposed don't connect
             if not self.disposed:
                 try:
-                    self.ftp = ftplib.FTP(self.uri)
+                    self.ftp = ftplib.FTP(self.uri, timeout = None)
                     self.ftp.login()
                 except ftplib.all_errors as e:
                     self.__dispose()
@@ -82,7 +82,7 @@ class FTPConnection:
     def __disconnect(self):
         try:
             self.ftp.quit()
-        except ftplib.all_errors:
+        except ftplib.all_errors + (ValueError,):
             pass
 
     
@@ -134,11 +134,14 @@ class FTPManager:
             self.__connection_failed(con)
         #check connection
         try:
-            con.voidcmd("NOOP")
+            #lock connection to eliminate conflicts
+            with con.op_lock:
+                con.ftp.voidcmd("NOOP")
         #reconnect on failure
         except ftplib.all_errors:
-            print("disconnect")
             con.reconnect()
+        except Exception as e:
+            print("Error in heartbeat thread: %s" % str(e), file = stderr)
 
 
 
@@ -148,7 +151,7 @@ class FTPManager:
         #get connection from queue, block if none available
         try:
             con = self.cons.get(timeout = self.timeout)
-        except queue.Empty:
+        except Empty:
             raise GetConnectionTimeoutError("Timed out while attempting to get connection")
         #wait for connection to initialize
         #if the connection is disposed (failed to initialize) indicate failure and get next connection
@@ -165,7 +168,6 @@ class FTPManager:
 
     #connection failed while being used, try to reconnect or get another connection
     def reconnect(self, con):
-        print("reconnect")
         new_con = None
         if self.disposed:
             raise Exception("reconnect called after disposed")
@@ -176,13 +178,11 @@ class FTPManager:
                 new_con = con
         #reconnect the connection (not threaded) and return after, if the connection failed to reconnect, try to get the next connection
         else:
-            print("con reconnecting")
             if con.reconnect(threaded = False):
                 new_con = con
         if new_con is None:
             self.__connection_failed(con)
             new_con = self.get_con()
-        print("reconnected")
         return new_con
 
     #if the connection failed and was disposed remove from all connections list

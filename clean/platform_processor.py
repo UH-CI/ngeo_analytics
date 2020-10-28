@@ -17,15 +17,29 @@ def handle_gpl(connector, gpl, g2a_db, ftp_handler, db_retry, ftp_retry, batch_s
     
     #(id_col, [translation_cols])
     header_info = None
-    def handle_row(header, row):
-        nonlocal batch
+    header = None
+    handled_header = False
+    #super fast check
+    def check_continue(row):
         nonlocal header_info
-        
-        if header_info is None:
+        nonlocal header
+        if header is None:
+            header = row
             header_info = get_id_cols_and_validate(header)
             #no id column or translatable columns were found, return false to terminate reading
             if header_info[0] is None or len(header_info[1]) == 0:
                 return False
+        else:
+            return True
+
+    def handle_row(row):
+        nonlocal batch
+        nonlocal header_info
+        nonlocal header
+        nonlocal handled_header
+        if not handled_header:
+            handled_header = True
+            return
 
         gene_id = get_gene_id_from_row(header, row, header_info[1], g2a_db)
         ref_id = row[header_info[0]]
@@ -42,14 +56,12 @@ def handle_gpl(connector, gpl, g2a_db, ftp_handler, db_retry, ftp_retry, batch_s
                 #just let errors be handled in thread executor callback, if a single batch fails just redo the whole platform for simplicity sake
                 submit_db_batch(connector, batch, db_retry)
                 batch = []
-                
-        #continue to next row
-        return True
+
 
     #let errors be handled by callee (log error and don't mark gpl as processed)
     #note that some of the unprocessed gpls may just not exist, can check those after
     try:
-        ftp_handler.process_gpl_data(gpl, handle_row, ftp_retry)
+        ftp_handler.process_gpl_data(gpl, check_continue, handle_row, ftp_retry)
     #if a resource not found error was raised then the resource doesn't exist on the ftp server, just skip this one
     except ResourceNotFoundError:
         pass

@@ -172,9 +172,9 @@ type_details = {
 
 
 
-def get_ftp_files(ftp, dir):
+def get_ftp_files(con, dir):
     #may throw an error if something wrong with connection, catch in ftp handler
-    files = ftp.nlst(dir)
+    files = con.ftp.nlst(dir)
     return files
     
 def get_resource_dir(accession, resource_details):
@@ -194,7 +194,8 @@ def get_resource_dir(accession, resource_details):
     return resource_dir
 
 
-def get_gpl_data_stream(ftp, gpl, data_processor):
+
+def get_gpl_data_stream(con, gpl, data_processor):
     resource_details = {
         "acc_prefix": "GPL",
         "resource_base": "/geo/platforms/",
@@ -208,7 +209,7 @@ def get_gpl_data_stream(ftp, gpl, data_processor):
     files = None
     #verify resource exists and thow exception if it doesn't
     try:
-        files = get_ftp_files(ftp, resource_dir)
+        files = get_ftp_files(con, resource_dir)
     #if temp error response should be resource not found
     except ftplib.error_temp as e:
         #raise a separate error if the issue was that the resource was not found (temp, 450), otherwise just reflect error
@@ -219,10 +220,10 @@ def get_gpl_data_stream(ftp, gpl, data_processor):
     if resource not in files:
         raise ResourceNotFoundError("Resource not found %s" % resource)
 
-    get_data_stream_from_resource(ftp, resource, data_processor)
+    get_data_stream_from_resource(con, resource, data_processor)
 
 
-def get_gse_data_stream(ftp, gse, gpl, data_processor):
+def get_gse_data_stream(con, gse, gpl, data_processor):
     resource_details = {
         "acc_prefix": "GSE",
         "resource_base": "/geo/series/",
@@ -241,7 +242,7 @@ def get_gse_data_stream(ftp, gse, gpl, data_processor):
     resource_multiple = "%s%s" % (resource_dir, file_multiple)
     files = None
     try:
-        files = get_ftp_files(ftp, resource_dir)
+        files = get_ftp_files(con, resource_dir)
     #if temp error response should be resource not found
     except ftplib.error_temp as e:
         #raise a separate error if the issue was that the resource was not found (temp, 450), otherwise just reflect error
@@ -253,7 +254,7 @@ def get_gse_data_stream(ftp, gse, gpl, data_processor):
         resource = resource_multiple
     else:
         raise ResourceNotFoundError("Resource not found in dir %s" % resource_dir)
-    get_data_stream_from_resource(ftp, resource, data_processor)
+    get_data_stream_from_resource(con, resource, data_processor)
 
 #series are <gse>_series_matrix.txt.gz if only one platform associated
 #otherwise <gse>-<gpl>_series_matrix.txt.gz
@@ -262,37 +263,133 @@ def get_gse_data_stream(ftp, gse, gpl, data_processor):
 class FTPStreamException(Exception):
     pass
 
+#have to have internal error handling and reconnect, need to read file from start till done since compressed
 class FTPDirectStreamReader():
-    def __init__(self, ftp, resource, bufsize, chunksize = 2048):
-        self.ftp = ftp
+    def __init__(self, con, resource, bufsize, chunksize = 2048, socket_retry_limit = 20):
+        self.connected = False
+        self.con = con
+        self.resource = resource
         self.chunksize = chunksize
+        self.bytes_read = 0
+        self.socket_retries = socket_retry_limit
+        self.sock = None
         #use intermediary buffer so can read consistent chunks (use the circularRWBuffer since it should be pretty efficient)
         self.buffer = CircularRWBuffer(bufsize)
-        ftp.voidcmd("TYPE I")
-        self.sock = ftp.transfercmd("RETR %s" % resource)
+        self.create_transfer_socket()
 
+    def create_transfer_socket(self):
+        self.con.ftp.voidcmd("TYPE I")
+        #start RETR command on resource with offset of number of bytes read so far
+        self.sock = self.con.ftp.transfercmd("RETR %s" % self.resource, rest = self.bytes_read)
+
+    #should just return 0 bytes on failure
     def read(self, size):
-        #read chunks to buffer until have enough data
-        while self.buffer.get_size() < size: 
-            data = self.sock.recv(self.chunksize)
-            #reached end of stream
-            if not data:
-                self.buffer.end_of_data()
-                break
-            self.buffer.write(data)
+        data = None
+        read_data = None
+        #read chunks to buffer until have enough data or until disposed due to error or end of stream
+        while self.sock is not None and self.buffer.get_size() < size:
+            retry = False
+            got_data = True
+            data = self.read_from_socket()
+            #if data None there was an unrecoverable error getting data
+            if data is not None:
+                #track file position
+                self.bytes_read += len(data)
+                #reached end of stream
+                if not data:
+                    #check if something wrong with ftp connection and should retry data retreival (just continue loop)
+                    #otherwise end of stream
+                    if not self.check_retry_end_of_stream():
+                        self.buffer.end_of_data()
+                        break
+                #write data to buffer
+                self.buffer.write(data)
+        #get requested bytes from buffer
         data = self.buffer.read(size)
         return data
 
-    def dispose(self):
-        self.sock.close()
-        #if there was an issue with the connection this may error out
+    def read_from_socket(self):
+        data = None
+        #error on socket closed (will throw EOF file if data read fails in gzip)
+        #if this throws an error (socket forcibly closed) is the entire connection dead, or can just make a new socket?
         try:
-            #response will be a 4xx error response because transfer closed before complete, use getmultiline to get response with no error handling
-            resp = self.ftp.getmultiline()
-            #set ftp object's lastresp property to ensure object consistency
-            self.ftp.lastresp = resp[:3]
-        except ftplib.all_errors:
-            pass
+            data = self.sock.recv(self.chunksize)
+        except OSError as e:
+            connected = True
+            #try to close socket and cleanup connection
+            self.dispose()
+            #try to reconnect if have retries remaining
+            if self.socket_retries > 0:
+                #less one socket retry
+                self.socket_retries -= 1
+                #try to send noop to see if FTP connection died completely
+                try:
+                    #if this successful just mark reconnected as False (was not reconnected, should proceed with )
+                    self.con.ftp.voidcmd("NOOP")
+                #connection to FTP server is dead, reconnect the connection, create a new transfer socket at the position last received from and retry read
+                except Exception:
+                    #reconnect to FTP server (threadless), if reconnect unsuccessful indicate not connected so don't try to create socket
+                    if not self.con.reconnect(False):
+                        connected = False
+                #FTP connection not connected, leave data as None
+                if connected:
+                    try:
+                        #create new transfer socket at position in file
+                        self.create_transfer_socket()
+                        #try to read from socket again
+                        data = self.read_from_socket()
+                    #if could not create socket then just leave data as None
+                    except Exception:
+                        pass
+        return data
+
+    #check if proper end of stream or due to ftp connection loss (verify ftp connection still active)
+    def check_retry_end_of_stream(self):
+        #return whether the connection was still active (if it was then should be at proper end of stream, otherwise should try to get data again)
+        retry = True
+        #dispose (close socket and cleanup connection) so can properly check source ftp connection
+        self.dispose()
+        try:
+            #check if connection works
+            self.con.ftp.voidcmd("NOOP")
+            #connection still active, should be proper end of stream, no need retry
+            retry = False
+        #connection dead
+        except Exception:
+            #check if should retry connection
+            if self.socket_retries > 0:
+                # print(self.socket_retries)
+                # print(self.bytes_read)
+                #less one retry
+                self.socket_retries -= 1
+                #reconnect to FTP server (threadless), if reconnect unsuccessful just end data stream with no retry (FTP handler can use manager reconnect to get an available connection)
+                if self.con.reconnect(False):
+                    try:
+                        #create new transfer socket at position in file
+                        self.create_transfer_socket()
+                    #could not create new transfer socket, don't retry
+                    except Exception:
+                        retry = false
+                #could not reconnect, don't retry
+                else:
+                    retry = False
+        return retry
+
+    def dispose(self):
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except:
+                pass
+            self.sock = None
+            #if there was an issue with the connection this may error out
+            try:
+                #response will be a 4xx error response because transfer closed before complete, use getmultiline to get response with no error handling
+                resp = self.con.ftp.getmultiline()
+                #set ftp object's lastresp property to ensure object consistency
+                self.con.ftp.lastresp = resp[:3]
+            except:
+                pass
         
 
     def __enter__(self):
@@ -307,10 +404,10 @@ class FTPDirectStreamReader():
 
 
 
-def retr_data(ftp, resource, stream, blocksize, term_flag, t_data):
+def retr_data(con, resource, stream, blocksize, term_flag, t_data):
     try:
-        ftp.voidcmd('TYPE I')
-        with ftp.transfercmd("RETR %s" % resource) as sock:
+        con.ftp.voidcmd('TYPE I')
+        with con.ftp.transfercmd("RETR %s" % resource) as sock:
             data = sock.recv(blocksize)
             while data:
                 #check if should terminate
@@ -320,9 +417,9 @@ def retr_data(ftp, resource, stream, blocksize, term_flag, t_data):
                 #get next block of data
                 data = sock.recv(blocksize)
         #response will be a 4xx error response because transfer closed before complete, use getmultiline to get response with no error handling
-        resp = ftp.getmultiline()
+        resp = con.ftp.getmultiline()
         #set ftp object's lastresp property to ensure object consistency
-        ftp.lastresp = resp[:3]
+        con.ftp.lastresp = resp[:3]
         stream.end_of_data()
     except Exception as e:
         #set exception in thread data object to the thrown exception so can be handled by caller
@@ -332,7 +429,7 @@ def retr_data(ftp, resource, stream, blocksize, term_flag, t_data):
 
 
 
-def get_data_stream_from_resource(ftp, resource, data_processor):
+def get_data_stream_from_resource(con, resource, data_processor):
     # #256KB starting buffer
     # stream = CircularRWBuffer(262144)
 
@@ -360,6 +457,6 @@ def get_data_stream_from_resource(ftp, resource, data_processor):
     # if err is not None:
     #     raise err
 
-    with FTPDirectStreamReader(ftp, resource, 8192) as stream:
+    with FTPDirectStreamReader(con, resource, 8192) as stream:
         data_processor(stream)
 

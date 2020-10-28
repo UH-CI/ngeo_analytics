@@ -6,6 +6,8 @@ from time import sleep
 from sqlalchemy import exc
 import random
 
+class DBConnectorError(Exception):
+    pass
 
 class DBConnector():
     def __init__(self, config = None):
@@ -74,12 +76,12 @@ class DBConnector():
             with self.engine.begin() as con:
                 res = con.execute(query, params) if params is not None else con.execute(query)
         except exc.OperationalError as e:
-            #check if deadlock error (code 1213)
-            if e.orig.args[0] == 1213:
+            #check if deadlock error (code 1213), or lost connection during query (code 2013)
+            if e.orig.args[0] == 1213 or e.orig.args[0] == 2013:
                 backoff = 0
-                #if first failure backoff of 0.25-0.5 seconds
+                #if first failure backoff of 0.15-0.3 seconds
                 if delay == 0:
-                    backoff = 0.25 + random.uniform(0, 0.25)
+                    backoff = 0.15 + random.uniform(0, 0.15)
                 #otherwise 2-3x current backoff
                 else:
                     backoff = delay * 2 + random.uniform(0, delay)
@@ -104,4 +106,4 @@ class DBConnector():
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.cleanup_db_engine()
         if exc_type is not None:
-            raise exc_type(exc_val)
+            raise DBConnectorError("An error occured while using database connector: type: %s, error: %s" % (exc_type.__name__, exc_val))

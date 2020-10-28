@@ -9,54 +9,76 @@ import ftp_downloader
 import sys
 import traceback
 
+class FTPHandlerError(Exception):
+    pass
 
 class FTPHandler:
     def __init__(self, ftp_base, ftp_pool_size, ftp_opts):
         self.manager = FTPManager(ftp_base, ftp_pool_size, **ftp_opts)
 
 
-    def parse_data_table_gz(self, file, table_start, table_end, row_processor):
+    # def parse_data_table_gz(self, file, table_start, table_end, row_processor):
+    #     with gzip.open(file, "rt", encoding = "utf8", errors = "ignore") as f:
+    #         #read past header data to table
+    #         for line in f:
+    #             line = line.strip()
+    #             if line == table_start:
+    #                 break
+    #         reader = csv.reader(f, delimiter='\t')
+    #         header = None
+    #         for row in reader:
+    #             #apparently some might have extra lines? just ignore
+    #             if len(row) == 0:
+    #                 continue
+    #             if row[0] == table_end:
+    #                 break
+    #             #haven't gotten header yet, this row should be the header
+    #             if header is None:
+    #                 header = row
+    #             else:
+    #                 #row processor should signal if done with data
+    #                 if not row_processor(header, row):
+    #                     break
+
+
+    def parse_data_table_gz(self, file, table_start, table_end, check_continue, row_processor):
+        #store data table rows so can quickly transfer data, less prone to disconnect issues and overall faster due to multiple reconnects for long running transfers
+        data_rows = []
         with gzip.open(file, "rt", encoding = "utf8", errors = "ignore") as f:
             #read past header data to table
             for line in f:
                 line = line.strip()
                 if line == table_start:
                     break
-            reader = csv.reader(f, delimiter='\t')
-            header = None
+            #quote none should prevent fields with single quote character from accidentally being overrun
+            reader = csv.reader(f, delimiter='\t', quoting=csv.QUOTE_NONE)
             for row in reader:
                 #apparently some might have extra lines? just ignore
                 if len(row) == 0:
                     continue
                 if row[0] == table_end:
                     break
-                #haven't gotten header yet, this row should be the header
-                if header is None:
-                    header = row
-                else:
-                    #row processor should signal if done with data
-                    if not row_processor(header, row):
-                        break
+                if check_continue(row):
+                    data_rows.append(row)
+        for row in data_rows:
+            row_processor(row)
 
 
 
 
-    def data_processor(self, table_start, table_end, row_handler):
+    def data_processor(self, table_start, table_end, check_continue, row_handler):
         def _data_processor(file):
-            self.parse_data_table_gz(file, table_start, table_end, row_handler)
+            self.parse_data_table_gz(file, table_start, table_end, check_continue, row_handler)
         return _data_processor
 
     #shouldn't need a delay on retry, just getting another connection from the pool
-    def process_gpl_data(self, gpl, row_handler, retry):
-        self.__process_gpl_data_r(gpl, row_handler, retry)
+    def process_gpl_data(self, gpl, check_continue, row_handler, retry):
+        self.__process_gpl_data_r(gpl, check_continue, row_handler, retry)
         
 
     
-    def __process_gpl_data_r(self, gpl, row_handler, retry, ftp_con = None, last_error = None):
+    def __process_gpl_data_r(self, gpl, check_continue, row_handler, retry, ftp_con = None, last_error = None):
         if retry < 0:
-            print("failure")
-            print(retry)
-            print(last_error)
             if ftp_con is not None:
                 #release connection, there may be an issue with it, but it's not my problem anymore (should be picked up by heartbeat or something)
                 self.manager.return_con(ftp_con)
@@ -70,20 +92,19 @@ class FTPHandler:
         else:
             ftp_con = self.manager.reconnect(ftp_con) 
 
-        ftp = ftp_con.ftp
         table_start = "!platform_table_begin"
         table_end = "!platform_table_end"
         try:
-            ftp_downloader.get_gpl_data_stream(ftp, gpl, self.data_processor(table_start, table_end, row_handler))
+            #lock operations to eliminate conflicts
+            with ftp_con.op_lock:
+                ftp_downloader.get_gpl_data_stream(ftp_con, gpl, self.data_processor(table_start, table_end, check_continue, row_handler))
             self.manager.return_con(ftp_con)
         #problem with connection
         #this syntax though... ftplib.all_errors is a tuple of exceptions, have to add a second tuple containing extra exceptions to add exception (, at end of tuple forces type to tuple)
         except ftplib.all_errors + (ftp_downloader.FTPStreamException,) as e:
             #retry
-            info = sys.exc_info()
-            print(info[1])
-            print(traceback.print_tb(info[2]))
-            self.__process_gpl_data_r(gpl, row_handler, retry - 1, ftp_con, e)
+            #info = sys.exc_info()
+            self.__process_gpl_data_r(gpl, check_continue, row_handler, retry - 1, ftp_con, e)
         #probably an issue with resource info or gpl/resource does not exist
         #shouldn't actually be a problem with the connection, assumes error was not in return_con call
         except Exception as e:
@@ -101,6 +122,6 @@ class FTPHandler:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.dispose()
         if exc_type is not None:
-            raise exc_type(exc_val)
+            raise FTPHandlerError("An error occured in the FTP Handler: type: %s, error: %s" % (exc_type.__name__, exc_val))
 
 
