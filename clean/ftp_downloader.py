@@ -195,7 +195,7 @@ def get_resource_dir(accession, resource_details):
 
 
 
-def get_gpl_data_stream(con, gpl, data_processor):
+def get_gpl_data_stream(con, gpl, stream_processor):
     resource_details = {
         "acc_prefix": "GPL",
         "resource_base": "/geo/platforms/",
@@ -220,10 +220,10 @@ def get_gpl_data_stream(con, gpl, data_processor):
     if resource not in files:
         raise ResourceNotFoundError("Resource not found %s" % resource)
 
-    get_data_stream_from_resource(con, resource, data_processor)
+    return get_data_stream_from_resource(con, resource, stream_processor)
 
 
-def get_gse_data_stream(con, gse, gpl, data_processor):
+def get_gse_data_stream(con, gse, gpl, stream_processor):
     resource_details = {
         "acc_prefix": "GSE",
         "resource_base": "/geo/series/",
@@ -254,7 +254,7 @@ def get_gse_data_stream(con, gse, gpl, data_processor):
         resource = resource_multiple
     else:
         raise ResourceNotFoundError("Resource not found in dir %s" % resource_dir)
-    get_data_stream_from_resource(con, resource, data_processor)
+    return get_data_stream_from_resource(con, resource, stream_processor)
 
 #series are <gse>_series_matrix.txt.gz if only one platform associated
 #otherwise <gse>-<gpl>_series_matrix.txt.gz
@@ -429,7 +429,7 @@ def retr_data(con, resource, stream, blocksize, term_flag, t_data):
 
 
 
-def get_data_stream_from_resource(con, resource, data_processor):
+def get_data_stream_from_resource(con, resource, stream_processor):
     # #256KB starting buffer
     # stream = CircularRWBuffer(262144)
 
@@ -456,7 +456,10 @@ def get_data_stream_from_resource(con, resource, data_processor):
     # #raise any exceptions that were encountered in data handler
     # if err is not None:
     #     raise err
-
+    data = None
     with FTPDirectStreamReader(con, resource, 8192) as stream:
-        data_processor(stream)
+        with con.op_lock:
+            data = stream_processor(stream)
+    return data
+    
 

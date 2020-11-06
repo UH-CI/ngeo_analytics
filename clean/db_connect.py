@@ -20,21 +20,39 @@ class DBConnector():
             with open(default_config_file) as f:
                 config = json.load(f)["extern_db_config"]
 
+        self.config = config
+
+        self.__start()
+
         
-        if config["tunnel"]["use_tunnel"]:    
-            from sshtunnel import SSHTunnelForwarder
+        
 
-            tunnel_config = config["tunnel"]["tunnel_config"]
-            self.tunnel = SSHTunnelForwarder(
-                (tunnel_config["ssh"], tunnel_config["ssh_port"]),
-                ssh_username = tunnel_config["user"],
-                ssh_password = tunnel_config["password"],
-                remote_bind_address = (tunnel_config["remote"], int(tunnel_config["remote_port"])),
-                local_bind_address = (tunnel_config["local"], int(tunnel_config["local_port"])) if tunnel_config["local_port"] is not None else (tunnel_config["local"], )
-            )
+        
 
-            self.tunnel.start()
+    def __start():
+        config = self.config
+        if config["tunnel"]["use_tunnel"]:
+            #only import if tunnel is None (no tunnel created before), note don't need to import this if tunneling not being used
+            if self.tunnel is None:
+                from sshtunnel import SSHTunnelForwarder
+            self.__start_tunnel()
+            
+        self.__start_engine()
 
+    def __start_tunnel():
+        tunnel_config = config["tunnel"]["tunnel_config"]
+        self.tunnel = SSHTunnelForwarder(
+            (tunnel_config["ssh"], tunnel_config["ssh_port"]),
+            ssh_username = tunnel_config["user"],
+            ssh_password = tunnel_config["password"],
+            remote_bind_address = (tunnel_config["remote"], int(tunnel_config["remote_port"])),
+            local_bind_address = (tunnel_config["local"], int(tunnel_config["local_port"])) if tunnel_config["local_port"] is not None else (tunnel_config["local"], )
+        )
+
+        self.tunnel.start()
+
+    def __start_engine():
+        config = self.config
         #create and populate sql configuration from config file
         sql_config = {}
         sql_config["lang"] = config["lang"]
@@ -49,37 +67,56 @@ class DBConnector():
 
         #create engine from URI
         self.engine = sqlalchemy.create_engine(SQLALCHEMY_DATABASE_URI)
+    
+
+    def __restart_con(self):
+        self.cleanup_db_con()
+        self.__start()
+
+    def __dispose_engine(self):
+        try:
+            self.engine.dispose()
+        except:
+            pass
+
+    def __dispose_tunnel(self):
+        if self.tunnel is not None:
+            try:
+                self.tunnel.stop()
+            except:
+                pass
+    
+
+    def __cleanup_db_con(self):
+        if not self.disposed:
+            self.__dispose_engine()
+            self.__dispose_tunnel()
+
+    def dispose(self):
+        self.cleanup_db_con()
+        self.disposed = True
+
 
 
     def get_engine(self):
         return self.engine
 
-    def cleanup_db_engine(self):
-        if not self.disposed:
-            self.engine.dispose()
-            if self.tunnel is not None:
-                self.tunnel.stop()
-            self.disposed = True
-
 
     def __engine_exec_r(self, query, params, retry, delay = 0):
         if retry < 0:
             raise Exception("Retry limit exceeded")
-        #HANDLE THIS IN CALLER
-        # #do nothing if empty list (note batch size limiting handled in caller in this case)
-        # elif len(batch) > 0:
         sleep(delay)
         res = None
         #engine.begin() block has error handling logic, so try catch should be outside of this block
-        #note caller should handle errors and cleanup engine as necessary
+        #note caller should handle errors and cleanup engine as necessary (or use with)
         try:
             with self.engine.begin() as con:
                 res = con.execute(query, params) if params is not None else con.execute(query)
         except exc.OperationalError as e:
-            #check if deadlock error (code 1213), or lost connection during query (code 2013)
-            if e.orig.args[0] == 1213 or e.orig.args[0] == 2013:
+            #check if deadlock error (code 1213)
+            if e.orig.args[0] == 1213:
                 backoff = 0
-                #if first failure backoff of 0.15-0.3 seconds
+                #if first deadlock backoff of 0.15-0.3 seconds
                 if delay == 0:
                     backoff = 0.15 + random.uniform(0, 0.15)
                 #otherwise 2-3x current backoff
@@ -89,7 +126,16 @@ class DBConnector():
                 res = self.__engine_exec_r(query, params, retry - 1, backoff)
             #something else went wrong, log exception and add to failures
             else:
-                raise e
+                #if something happens to the tunnel it may throw a db connection error, just restart everything to be safe
+                self.__restart_con()
+                #self.__restart_engine()
+                #no reason to delay
+                res = self.__engine_exec_r(query, params, retry - 1, 0)
+        except:
+            #not sure what the error was, restart everything
+            self.__restart_con()
+            #no reason to delay
+            res = self.__engine_exec_r(query, params, retry - 1, 0)
         #return query result
         return res
 
@@ -104,6 +150,6 @@ class DBConnector():
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup_db_engine()
+        self.dispose()
         if exc_type is not None:
             raise DBConnectorError("An error occured while using database connector: type: %s, error: %s" % (exc_type.__name__, exc_val))
